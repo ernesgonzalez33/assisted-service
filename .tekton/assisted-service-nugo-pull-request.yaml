@@ -170,6 +170,7 @@ spec:
         - name: clone-repository
           image: registry.access.redhat.com/ubi8/ubi:latest
           script: |
+            yum install git -y
             git clone ${PARAM_URL}
             RESULT_SHA="$(git rev-parse HEAD)"
             RESULT_COMMITTER_DATE="$(git log -1 --pretty=%ct)"
