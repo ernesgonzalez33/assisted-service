@@ -156,8 +156,12 @@ spec:
         - name: PARAM_URL
           values: $(params.url)
         results:
+        - name: commit
+          description: The precise commit SHA that was fetched by this Task.
         - name: url
           description: The precise URL that was fetched by this Task.
+        - name: committer-date
+          description: The epoch timestamp of the commit that was fetched by this Task.
         params:
         - name: url
         workspaces:
@@ -167,6 +171,10 @@ spec:
           image: registry.access.redhat.com/ubi8/ubi:latest
           script: |
             git clone ${PARAM_URL}
+            RESULT_SHA="$(git rev-parse HEAD)"
+            RESULT_COMMITTER_DATE="$(git log -1 --pretty=%ct)"
+            printf "%s" "${RESULT_COMMITTER_DATE}" > "$(results.committer-date.path)"
+            printf "%s" "${RESULT_SHA}" > "$(results.commit.path)"
             printf "%s" "${PARAM_URL}" > "$(results.url.path)"
     - name: prefetch-dependencies
       params:
