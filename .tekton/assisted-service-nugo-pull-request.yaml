@@ -152,6 +152,12 @@ spec:
       - name: output
         workspace: workspace
       taskSpec:
+        env:
+        - name: PARAM_URL
+          values: $(params.url)
+        results:
+        - name: url
+          description: The precise URL that was fetched by this Task.
         params:
         - name: url
         workspaces:
@@ -159,7 +165,9 @@ spec:
         steps:
         - name: clone-repository
           image: registry.access.redhat.com/ubi8/ubi:latest
-          script: git clone $(params.url)
+          script: |
+            git clone ${PARAM_URL}
+            printf "%s" "${PARAM_URL}" > "$(results.url.path)"
     - name: prefetch-dependencies
       params:
       - name: input
