@@ -154,7 +154,7 @@ spec:
       taskSpec:
         env:
         - name: PARAM_URL
-          values: $(params.url)
+          value: $(params.url)
         results:
         - name: commit
           description: The precise commit SHA that was fetched by this Task.
