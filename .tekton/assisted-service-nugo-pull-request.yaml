@@ -162,8 +162,6 @@ spec:
           description: The precise URL that was fetched by this Task.
         - name: committer-date
           description: The epoch timestamp of the commit that was fetched by this Task.
-        params:
-        - name: url
         workspaces:
         - name: output
         steps:
