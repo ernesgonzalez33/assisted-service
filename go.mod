@@ -5,7 +5,7 @@ go 1.18
 require (
 	github.com/NYTimes/gziphandler v1.1.1
 	github.com/alecthomas/units v0.0.0-20190924025748-f65c72e2690d
-	github.com/asaskevich/govalidator v0.0.0-20210307081110-f21760c49a8d
+	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2
 	github.com/aws/aws-sdk-go v1.44.163
 	github.com/bombsimon/logrusr/v3 v3.0.0
 	github.com/buger/jsonparser v1.1.1
