@@ -5,9 +5,10 @@ import (
 	"compress/zlib"
 	"encoding/binary"
 	"fmt"
-	"io/ioutil"
+	"io"
 
-	"github.com/pierrec/lz4"
+	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
 	"github.com/ulikunitz/xz"
 	"github.com/ulikunitz/xz/lzma"
 )
@@ -25,11 +26,11 @@ type Compressor interface {
 type CompressorLzma struct {
 }
 
-func (c CompressorLzma) compress(in []byte) ([]byte, error) {
+func (c *CompressorLzma) compress(in []byte) ([]byte, error) {
 	var b bytes.Buffer
 	lz, err := lzma.NewWriter(&b)
 	if err != nil {
-		return nil, fmt.Errorf("Error creating lzma compressor: %v", err)
+		return nil, fmt.Errorf("error creating lzma compressor: %v", err)
 	}
 	if _, err := lz.Write(in); err != nil {
 		return nil, err
@@ -39,26 +40,28 @@ func (c CompressorLzma) compress(in []byte) ([]byte, error) {
 	}
 	return b.Bytes(), nil
 }
-func (c CompressorLzma) decompress(in []byte) ([]byte, error) {
+func (c *CompressorLzma) decompress(in []byte) ([]byte, error) {
 	b := bytes.NewReader(in)
 	lz, err := lzma.NewReader(b)
 	if err != nil {
-		return nil, fmt.Errorf("Error creating lzma decompressor: %v", err)
+		return nil, fmt.Errorf("error creating lzma decompressor: %v", err)
 	}
-	p, err := ioutil.ReadAll(lz)
+	p, err := io.ReadAll(lz)
 	if err != nil {
-		return nil, fmt.Errorf("Error decompressing: %v", err)
+		return nil, fmt.Errorf("error decompressing: %v", err)
 	}
 	return p, nil
 }
-func (c CompressorLzma) loadOptions(b []byte) error {
+
+//nolint:unused,revive // it is important to implement the interface
+func (c *CompressorLzma) loadOptions(b []byte) error {
 	// lzma has no supported optiosn
 	return nil
 }
-func (c CompressorLzma) optionsBytes() []byte {
+func (c *CompressorLzma) optionsBytes() []byte {
 	return []byte{}
 }
-func (c CompressorLzma) flavour() compression {
+func (c *CompressorLzma) flavour() compression {
 	return compressionLzma
 }
 
@@ -67,10 +70,10 @@ type GzipStrategy uint16
 // gzip strategy options
 const (
 	GzipDefault          GzipStrategy = 0x1
-	GzipFiltered                      = 0x2
-	GzipHuffman                       = 0x4
-	GzipRunLengthEncoded              = 0x8
-	GzipFixed                         = 0x10
+	GzipFiltered         GzipStrategy = 0x2
+	GzipHuffman          GzipStrategy = 0x4
+	GzipRunLengthEncoded GzipStrategy = 0x8
+	GzipFixed            GzipStrategy = 0x10
 )
 
 // CompressorGzip gzip compression
@@ -80,11 +83,11 @@ type CompressorGzip struct {
 	Strategies       map[GzipStrategy]bool
 }
 
-func (c CompressorGzip) compress(in []byte) ([]byte, error) {
+func (c *CompressorGzip) compress(in []byte) ([]byte, error) {
 	var b bytes.Buffer
 	gz, err := zlib.NewWriterLevel(&b, int(c.CompressionLevel))
 	if err != nil {
-		return nil, fmt.Errorf("Error creating gzip compressor: %v", err)
+		return nil, fmt.Errorf("error creating gzip compressor: %v", err)
 	}
 	if _, err := gz.Write(in); err != nil {
 		return nil, err
@@ -97,23 +100,26 @@ func (c CompressorGzip) compress(in []byte) ([]byte, error) {
 	}
 	return b.Bytes(), nil
 }
-func (c CompressorGzip) decompress(in []byte) ([]byte, error) {
+func (c *CompressorGzip) decompress(in []byte) ([]byte, error) {
 	b := bytes.NewReader(in)
 	gz, err := zlib.NewReader(b)
 	if err != nil {
-		return nil, fmt.Errorf("Error creating gzip decompressor: %v", err)
+		return nil, fmt.Errorf("error creating gzip decompressor: %v", err)
 	}
-	p, err := ioutil.ReadAll(gz)
+	p, err := io.ReadAll(gz)
 	if err != nil {
-		return nil, fmt.Errorf("Error decompressing: %v", err)
+		return nil, fmt.Errorf("error decompressing: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		return nil, err
 	}
 	return p, nil
 }
 
-func (c CompressorGzip) loadOptions(b []byte) error {
+func (c *CompressorGzip) loadOptions(b []byte) error {
 	expected := 8
 	if len(b) != expected {
-		return fmt.Errorf("Cannot parse gzip options, received %d bytes expected %d", len(b), expected)
+		return fmt.Errorf("cannot parse gzip options, received %d bytes expected %d", len(b), expected)
 	}
 	c.CompressionLevel = binary.LittleEndian.Uint32(b[0:4])
 	c.WindowSize = binary.LittleEndian.Uint16(b[4:6])
@@ -127,7 +133,7 @@ func (c CompressorGzip) loadOptions(b []byte) error {
 	c.Strategies = strategies
 	return nil
 }
-func (c CompressorGzip) optionsBytes() []byte {
+func (c *CompressorGzip) optionsBytes() []byte {
 	b := make([]byte, 8)
 	binary.LittleEndian.PutUint32(b[0:4], c.CompressionLevel)
 	binary.LittleEndian.PutUint16(b[4:6], c.WindowSize)
@@ -140,7 +146,7 @@ func (c CompressorGzip) optionsBytes() []byte {
 	binary.LittleEndian.PutUint16(b[6:8], flags)
 	return b
 }
-func (c CompressorGzip) flavour() compression {
+func (c *CompressorGzip) flavour() compression {
 	return compressionGzip
 }
 
@@ -150,11 +156,11 @@ type XzFilter uint32
 // xz filter options
 const (
 	XzFilterX86      XzFilter = 0x1
-	XzFilterPowerPC           = 0x2
-	XzFilterIA64              = 0x4
-	XzFilterArm               = 0x8
-	XzFilterArmThumb          = 0x10
-	XzFilterSparc             = 0x20
+	XzFilterPowerPC  XzFilter = 0x2
+	XzFilterIA64     XzFilter = 0x4
+	XzFilterArm      XzFilter = 0x8
+	XzFilterArmThumb XzFilter = 0x10
+	XzFilterSparc    XzFilter = 0x20
 )
 
 // CompressorXz xz compression
@@ -163,39 +169,39 @@ type CompressorXz struct {
 	ExecutableFilters map[XzFilter]bool
 }
 
-func (c CompressorXz) compress(in []byte) ([]byte, error) {
+func (c *CompressorXz) compress(in []byte) ([]byte, error) {
 	var b bytes.Buffer
 	config := xz.WriterConfig{
 		DictCap: int(c.DictionarySize),
 	}
-	xz, err := config.NewWriter(&b)
+	xzWriter, err := config.NewWriter(&b)
 	if err != nil {
-		return nil, fmt.Errorf("Error creating xz compressor: %v", err)
+		return nil, fmt.Errorf("error creating xz compressor: %v", err)
 	}
-	if _, err := xz.Write(in); err != nil {
+	if _, err := xzWriter.Write(in); err != nil {
 		return nil, err
 	}
-	if err := xz.Close(); err != nil {
+	if err := xzWriter.Close(); err != nil {
 		return nil, err
 	}
 	return b.Bytes(), nil
 }
-func (c CompressorXz) decompress(in []byte) ([]byte, error) {
+func (c *CompressorXz) decompress(in []byte) ([]byte, error) {
 	b := bytes.NewReader(in)
-	xz, err := xz.NewReader(b)
+	xzReader, err := xz.NewReader(b)
 	if err != nil {
-		return nil, fmt.Errorf("Error creating xz decompressor: %v", err)
+		return nil, fmt.Errorf("error creating xz decompressor: %v", err)
 	}
-	p, err := ioutil.ReadAll(xz)
+	p, err := io.ReadAll(xzReader)
 	if err != nil {
-		return nil, fmt.Errorf("Error decompressing: %v", err)
+		return nil, fmt.Errorf("error decompressing: %v", err)
 	}
 	return p, nil
 }
-func (c CompressorXz) loadOptions(b []byte) error {
+func (c *CompressorXz) loadOptions(b []byte) error {
 	expected := 8
 	if len(b) != expected {
-		return fmt.Errorf("Cannot parse xz options, received %d bytes expected %d", len(b), expected)
+		return fmt.Errorf("cannot parse xz options, received %d bytes expected %d", len(b), expected)
 	}
 	c.DictionarySize = binary.LittleEndian.Uint32(b[0:4])
 	filters := map[XzFilter]bool{}
@@ -208,7 +214,7 @@ func (c CompressorXz) loadOptions(b []byte) error {
 	c.ExecutableFilters = filters
 	return nil
 }
-func (c CompressorXz) optionsBytes() []byte {
+func (c *CompressorXz) optionsBytes() []byte {
 	b := make([]byte, 8)
 	binary.LittleEndian.PutUint32(b[0:4], c.DictionarySize)
 	var flags uint32
@@ -220,7 +226,7 @@ func (c CompressorXz) optionsBytes() []byte {
 	binary.LittleEndian.PutUint32(b[4:8], flags)
 	return b
 }
-func (c CompressorXz) flavour() compression {
+func (c *CompressorXz) flavour() compression {
 	return compressionXz
 }
 
@@ -240,7 +246,7 @@ type CompressorLz4 struct {
 	flags   map[lz4Flag]bool
 }
 
-func (c CompressorLz4) compress(in []byte) ([]byte, error) {
+func (c *CompressorLz4) compress(in []byte) ([]byte, error) {
 	var b bytes.Buffer
 	lz := lz4.NewWriter(&b)
 	if _, err := lz.Write(in); err != nil {
@@ -251,23 +257,23 @@ func (c CompressorLz4) compress(in []byte) ([]byte, error) {
 	}
 	return b.Bytes(), nil
 }
-func (c CompressorLz4) decompress(in []byte) ([]byte, error) {
+func (c *CompressorLz4) decompress(in []byte) ([]byte, error) {
 	b := bytes.NewReader(in)
 	lz := lz4.NewReader(b)
-	p, err := ioutil.ReadAll(lz)
+	p, err := io.ReadAll(lz)
 	if err != nil {
-		return nil, fmt.Errorf("Error decompressing: %v", err)
+		return nil, fmt.Errorf("error decompressing: %v", err)
 	}
 	return p, nil
 }
-func (c CompressorLz4) loadOptions(b []byte) error {
+func (c *CompressorLz4) loadOptions(b []byte) error {
 	expected := 8
 	if len(b) != expected {
-		return fmt.Errorf("Cannot parse lz4 options, received %d bytes expected %d", len(b), expected)
+		return fmt.Errorf("cannot parse lz4 options, received %d bytes expected %d", len(b), expected)
 	}
 	version := binary.LittleEndian.Uint32(b[0:4])
 	if version != lz4version1 {
-		return fmt.Errorf("Compressed with lz4 version %d, only support %d", version, lz4version1)
+		return fmt.Errorf("compressed with lz4 version %d, only support %d", version, lz4version1)
 	}
 	c.version = version
 	flagMap := map[lz4Flag]bool{}
@@ -280,7 +286,7 @@ func (c CompressorLz4) loadOptions(b []byte) error {
 	c.flags = flagMap
 	return nil
 }
-func (c CompressorLz4) optionsBytes() []byte {
+func (c *CompressorLz4) optionsBytes() []byte {
 	b := make([]byte, 8)
 	binary.LittleEndian.PutUint32(b[0:4], c.version)
 	var flags uint32
@@ -292,7 +298,7 @@ func (c CompressorLz4) optionsBytes() []byte {
 	binary.LittleEndian.PutUint32(b[4:8], flags)
 	return b
 }
-func (c CompressorLz4) flavour() compression {
+func (c *CompressorLz4) flavour() compression {
 	return compressionLz4
 }
 
@@ -306,10 +312,10 @@ const (
 	zstdMaxLevel uint32 = 22
 )
 
-func (c CompressorZstd) loadOptions(b []byte) error {
+func (c *CompressorZstd) loadOptions(b []byte) error {
 	expected := 4
 	if len(b) != expected {
-		return fmt.Errorf("Cannot parse zstd options, received %d bytes expected %d", len(b), expected)
+		return fmt.Errorf("cannot parse zstd options, received %d bytes expected %d", len(b), expected)
 	}
 	level := binary.LittleEndian.Uint32(b[0:4])
 	if level < zstdMinLevel || level > zstdMaxLevel {
@@ -318,13 +324,39 @@ func (c CompressorZstd) loadOptions(b []byte) error {
 	c.level = level
 	return nil
 }
-func (c CompressorZstd) optionsBytes() []byte {
+func (c *CompressorZstd) optionsBytes() []byte {
 	b := make([]byte, 4)
 	binary.LittleEndian.PutUint32(b[0:4], c.level)
 	return b
 }
-func (c CompressorZstd) flavour() compression {
+func (c *CompressorZstd) flavour() compression {
 	return compressionZstd
+}
+func (c *CompressorZstd) compress(in []byte) ([]byte, error) {
+	var b bytes.Buffer
+	z, err := zstd.NewWriter(&b)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zstd compressor: %w", err)
+	}
+	if _, err := z.Write(in); err != nil {
+		return nil, err
+	}
+	if err := z.Close(); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+func (c *CompressorZstd) decompress(in []byte) ([]byte, error) {
+	z, err := zstd.NewReader(nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zstd decompressor: %w", err)
+	}
+	defer z.Close()
+	p, err := z.DecodeAll(in, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error decompressing zstd: %w", err)
+	}
+	return p, nil
 }
 
 func newCompressor(flavour compression) (Compressor, error) {
@@ -343,9 +375,9 @@ func newCompressor(flavour compression) (Compressor, error) {
 	case compressionLz4:
 		c = &CompressorLz4{}
 	case compressionZstd:
-		return nil, fmt.Errorf("zstd compression not yet supported")
+		c = &CompressorZstd{}
 	default:
-		return nil, fmt.Errorf("Unknown compression type: %d", flavour)
+		return nil, fmt.Errorf("unknown compression type: %d", flavour)
 	}
 	return c, nil
 }
