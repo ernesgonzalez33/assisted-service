@@ -24,15 +24,11 @@ import (
 )
 
 const (
-	ironicProxyService          = "ironic-proxy"
-	ironicPrivatePort           = 6388
-	inspectorPrivatePort        = 5051
-	ironicUpstreamIPEnvVar      = "IRONIC_UPSTREAM_IP"
-	ironicUpstreamPortEnvVar    = "IRONIC_UPSTREAM_PORT"
-	ironicProxyPortEnvVar       = "IRONIC_PROXY_PORT"
-	inspectorUpstreamIPEnvVar   = "IRONIC_INSPECTOR_UPSTREAM_IP"
-	inspectorUpstreamPortEnvVar = "IRONIC_INSPECTOR_UPSTREAM_PORT"
-	inspectorProxyPortEnvVar    = "IRONIC_INSPECTOR_PROXY_PORT"
+	ironicProxyService       = "ironic-proxy"
+	ironicPrivatePort        = 6388
+	ironicUpstreamIPEnvVar   = "IRONIC_UPSTREAM_IP"
+	ironicUpstreamPortEnvVar = "IRONIC_UPSTREAM_PORT"
+	ironicProxyPortEnvVar    = "IRONIC_PROXY_PORT"
 )
 
 func createContainerIronicProxy(ironicIP string, images *Images) corev1.Container {
@@ -41,23 +37,20 @@ func createContainerIronicProxy(ironicIP string, images *Images) corev1.Containe
 		Image:           images.Ironic,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: &corev1.SecurityContext{
-			Privileged: pointer.BoolPtr(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+				Add:  []corev1.Capability{"FOWNER"},
+			},
 		},
 		Command: []string{"/bin/runironic-proxy"},
 		VolumeMounts: []corev1.VolumeMount{
 			ironicTlsMount,
-			inspectorTlsMount,
 		},
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "ironic-proxy",
 				ContainerPort: int32(baremetalIronicPort),
 				HostPort:      int32(baremetalIronicPort),
-			},
-			{
-				Name:          "inspector-proxy",
-				ContainerPort: int32(baremetalIronicInspectorPort),
-				HostPort:      int32(baremetalIronicInspectorPort),
 			},
 		},
 		Env: []corev1.EnvVar{
@@ -66,24 +59,12 @@ func createContainerIronicProxy(ironicIP string, images *Images) corev1.Containe
 				Value: fmt.Sprint(baremetalIronicPort),
 			},
 			{
-				Name:  inspectorProxyPortEnvVar,
-				Value: fmt.Sprint(baremetalIronicInspectorPort),
-			},
-			{
 				Name:  ironicUpstreamIPEnvVar,
 				Value: ironicIP,
 			},
 			{
 				Name:  ironicUpstreamPortEnvVar,
 				Value: fmt.Sprint(ironicPrivatePort),
-			},
-			{
-				Name:  inspectorUpstreamIPEnvVar,
-				Value: ironicIP,
-			},
-			{
-				Name:  inspectorUpstreamPortEnvVar,
-				Value: fmt.Sprint(inspectorPrivatePort),
 			},
 			// The provisioning IP is not used except that
 			// httpd cannot start until the IP is available on some interface
@@ -102,18 +83,20 @@ func createContainerIronicProxy(ironicIP string, images *Images) corev1.Containe
 				corev1.ResourceMemory: resource.MustParse("50Mi"),
 			},
 		},
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 	}
 	return container
 }
 
 func newIronicProxyPodTemplateSpec(info *ProvisioningInfo) (*corev1.PodTemplateSpec, error) {
-	ironicIP, err := getPodHostIP(info.Client.CoreV1(), info.Namespace)
+	ironicIPs, err := getPodIPs(info.Client.CoreV1(), info.Namespace)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot figure out the upstream IP for ironic proxy")
 	}
 
 	containers := []corev1.Container{
-		createContainerIronicProxy(ironicIP, info.Images),
+		// Even in a dual-stack environment, we don't really care which IP address to use since both are accessible internally.
+		createContainerIronicProxy(ironicIPs[0], info.Images),
 	}
 
 	tolerations := []corev1.Toleration{
@@ -154,14 +137,6 @@ func newIronicProxyPodTemplateSpec(info *ProvisioningInfo) (*corev1.PodTemplateS
 			Volumes: []corev1.Volume{
 				{
 					Name: ironicTlsVolume,
-					VolumeSource: corev1.VolumeSource{
-						Secret: &corev1.SecretVolumeSource{
-							SecretName: tlsSecretName,
-						},
-					},
-				},
-				{
-					Name: inspectorTlsVolume,
 					VolumeSource: corev1.VolumeSource{
 						Secret: &corev1.SecretVolumeSource{
 							SecretName: tlsSecretName,

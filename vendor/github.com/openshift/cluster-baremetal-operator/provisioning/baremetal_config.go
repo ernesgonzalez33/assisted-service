@@ -30,15 +30,13 @@ var (
 	baremetalVmediaHttpsPort       = "6183"
 	baremetalWebhookPort           = "9447"
 	baremetalIronicPort            = 6385
-	baremetalIronicInspectorPort   = 5050
-	baremetalKernelUrlSubPath      = "images/ironic-python-agent.kernel"
+	baremetalKernelSubPath         = "ironic-python-agent.kernel"
 	baremetalIronicEndpointSubpath = "v1/"
 	provisioningIP                 = "PROVISIONING_IP"
 	provisioningInterface          = "PROVISIONING_INTERFACE"
 	provisioningMacAddresses       = "PROVISIONING_MACS"
 	deployKernelUrl                = "DEPLOY_KERNEL_URL"
 	ironicEndpoint                 = "IRONIC_ENDPOINT"
-	ironicInspectorEndpoint        = "IRONIC_INSPECTOR_ENDPOINT"
 	httpPort                       = "HTTP_PORT"
 	vmediaHttpsPort                = "VMEDIA_TLS_PORT"
 	dnsIP                          = "DNS_IP"
@@ -63,6 +61,9 @@ func getDHCPRange(config *metal3iov1alpha1.ProvisioningSpec) *string {
 }
 
 func getProvisioningIPCIDR(config *metal3iov1alpha1.ProvisioningSpec) *string {
+	if config.ProvisioningNetwork == metal3iov1alpha1.ProvisioningNetworkDisabled {
+		return nil
+	}
 	if config.ProvisioningNetworkCIDR != "" && config.ProvisioningIP != "" {
 		_, net, err := net.ParseCIDR(config.ProvisioningNetworkCIDR)
 		if err == nil {
@@ -75,19 +76,23 @@ func getProvisioningIPCIDR(config *metal3iov1alpha1.ProvisioningSpec) *string {
 }
 
 func getDeployKernelUrl() *string {
-	// TODO(dtantsur): it's a share file system, we should look into using a file:// URL
-	deployKernelUrl := fmt.Sprintf("http://localhost:%s/%s", baremetalHttpPort, baremetalKernelUrlSubPath)
+	deployKernelUrl := fmt.Sprintf("file://%s/%s", imageSharedDir, baremetalKernelSubPath)
 	return &deployKernelUrl
 }
 
-func getIronicEndpoint() *string {
-	ironicEndpoint := fmt.Sprintf("https://localhost:%d/%s", baremetalIronicPort, baremetalIronicEndpointSubpath)
-	return &ironicEndpoint
+func getControlPlanePort(info *ProvisioningInfo) (ironicPort int) {
+	ironicPort = baremetalIronicPort
+	if UseIronicProxy(&info.ProvConfig.Spec) {
+		// Direct access to real services behind the proxy.
+		ironicPort = ironicPrivatePort
+	}
+	return
 }
 
-func getIronicInspectorEndpoint() *string {
-	ironicInspectorEndpoint := fmt.Sprintf("https://localhost:%d/%s", baremetalIronicInspectorPort, baremetalIronicEndpointSubpath)
-	return &ironicInspectorEndpoint
+func getControlPlaneEndpoint(info *ProvisioningInfo) (ironicEndpoint string) {
+	ironicPort := getControlPlanePort(info)
+	ironicEndpoint = fmt.Sprintf("https://%s.%s.svc.cluster.local:%d/%s", stateService, info.Namespace, ironicPort, baremetalIronicEndpointSubpath)
+	return
 }
 
 func getProvisioningOSDownloadURL(config *metal3iov1alpha1.ProvisioningSpec) *string {
@@ -114,10 +119,6 @@ func getMetal3DeploymentConfig(name string, baremetalConfig *metal3iov1alpha1.Pr
 		return pointer.StringPtr(strings.Join(baremetalConfig.ProvisioningMacAddresses, ","))
 	case deployKernelUrl:
 		return getDeployKernelUrl()
-	case ironicEndpoint:
-		return getIronicEndpoint()
-	case ironicInspectorEndpoint:
-		return getIronicInspectorEndpoint()
 	case httpPort:
 		return pointer.StringPtr(baremetalHttpPort)
 	case vmediaHttpsPort:

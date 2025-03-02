@@ -19,25 +19,30 @@ package options
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/pflag"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/admission/initializer"
 	admissionmetrics "k8s.io/apiserver/pkg/admission/metrics"
 	"k8s.io/apiserver/pkg/admission/plugin/namespace/lifecycle"
+	validatingadmissionpolicy "k8s.io/apiserver/pkg/admission/plugin/policy/validating"
 	mutatingwebhook "k8s.io/apiserver/pkg/admission/plugin/webhook/mutating"
 	validatingwebhook "k8s.io/apiserver/pkg/admission/plugin/webhook/validating"
 	apiserverapi "k8s.io/apiserver/pkg/apis/apiserver"
 	apiserverapiv1 "k8s.io/apiserver/pkg/apis/apiserver/v1"
 	apiserverapiv1alpha1 "k8s.io/apiserver/pkg/apis/apiserver/v1alpha1"
 	"k8s.io/apiserver/pkg/server"
+	cacheddiscovery "k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
 	"k8s.io/component-base/featuregate"
 )
 
@@ -85,7 +90,7 @@ func NewAdmissionOptions() *AdmissionOptions {
 		// admission plugins. The apiserver always runs the validating ones
 		// after all the mutating ones, so their relative order in this list
 		// doesn't matter.
-		RecommendedPluginOrder: []string{lifecycle.PluginName, mutatingwebhook.PluginName, validatingwebhook.PluginName},
+		RecommendedPluginOrder: []string{lifecycle.PluginName, mutatingwebhook.PluginName, validatingadmissionpolicy.PluginName, validatingwebhook.PluginName},
 		DefaultOffPlugins:      sets.NewString(),
 	}
 	server.RegisterAllAdmissionPlugins(options.Plugins)
@@ -121,7 +126,8 @@ func (a *AdmissionOptions) AddFlags(fs *pflag.FlagSet) {
 func (a *AdmissionOptions) ApplyTo(
 	c *server.Config,
 	informers informers.SharedInformerFactory,
-	kubeAPIServerClientConfig *rest.Config,
+	kubeClient kubernetes.Interface,
+	dynamicClient dynamic.Interface,
 	features featuregate.FeatureGate,
 	pluginInitializers ...admission.PluginInitializer,
 ) error {
@@ -141,13 +147,23 @@ func (a *AdmissionOptions) ApplyTo(
 		return fmt.Errorf("failed to read plugin config: %v", err)
 	}
 
-	clientset, err := kubernetes.NewForConfig(kubeAPIServerClientConfig)
-	if err != nil {
-		return err
-	}
-	genericInitializer := initializer.New(clientset, informers, c.Authorization.Authorizer, features, c.DrainedNotify())
+	discoveryClient := cacheddiscovery.NewMemCacheClient(kubeClient.Discovery())
+	discoveryRESTMapper := restmapper.NewDeferredDiscoveryRESTMapper(discoveryClient)
+	genericInitializer := initializer.New(kubeClient, dynamicClient, informers, c.Authorization.Authorizer, features,
+		c.DrainedNotify(), discoveryRESTMapper)
 	initializersChain := admission.PluginInitializers{genericInitializer}
 	initializersChain = append(initializersChain, pluginInitializers...)
+
+	admissionPostStartHook := func(context server.PostStartHookContext) error {
+		discoveryRESTMapper.Reset()
+		go utilwait.Until(discoveryRESTMapper.Reset, 30*time.Second, context.StopCh)
+		return nil
+	}
+
+	err = c.AddPostStartHook("start-apiserver-admission-initializer", admissionPostStartHook)
+	if err != nil {
+		return fmt.Errorf("failed to add post start hook for policy admission: %w", err)
+	}
 
 	admissionChain, err := a.Plugins.NewFromPlugins(pluginNames, pluginsConfigProvider, initializersChain, a.Decorators)
 	if err != nil {

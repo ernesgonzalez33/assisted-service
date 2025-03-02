@@ -26,7 +26,6 @@ import (
 	keventsv1 "k8s.io/api/events/v1"
 	keventsv1beta1 "k8s.io/api/events/v1beta1"
 	kextensionsv1beta1 "k8s.io/api/extensions/v1beta1"
-	kflowcontrolv1alpha1 "k8s.io/api/flowcontrol/v1alpha1"
 	kflowcontrolv1beta1 "k8s.io/api/flowcontrol/v1beta1"
 	kflowcontrolv1beta2 "k8s.io/api/flowcontrol/v1beta2"
 	kimagepolicyv1alpha1 "k8s.io/api/imagepolicy/v1alpha1"
@@ -54,6 +53,7 @@ import (
 	"github.com/openshift/api/build"
 	"github.com/openshift/api/cloudnetwork"
 	"github.com/openshift/api/config"
+	"github.com/openshift/api/console"
 	"github.com/openshift/api/helm"
 	"github.com/openshift/api/image"
 	"github.com/openshift/api/imageregistry"
@@ -88,6 +88,7 @@ var (
 		authorization.Install,
 		build.Install,
 		config.Install,
+		console.Install,
 		helm.Install,
 		image.Install,
 		imageregistry.Install,
@@ -141,7 +142,6 @@ var (
 		keventsv1.AddToScheme,
 		keventsv1beta1.AddToScheme,
 		kextensionsv1beta1.AddToScheme,
-		kflowcontrolv1alpha1.AddToScheme,
 		kflowcontrolv1beta1.AddToScheme,
 		kflowcontrolv1beta2.AddToScheme,
 		kimagepolicyv1alpha1.AddToScheme,
