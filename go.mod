@@ -1,6 +1,8 @@
 module github.com/openshift/assisted-service
 
-go 1.18
+go 1.22
+
+toolchain go1.22.9
 
 require (
 	github.com/NYTimes/gziphandler v1.1.1
@@ -272,7 +274,7 @@ require (
 replace (
 	github.com/metal3-io/baremetal-operator => github.com/openshift/baremetal-operator v0.0.0-20230331001040-c7cddc04b0f9
 	github.com/metal3-io/baremetal-operator/apis => github.com/openshift/baremetal-operator/apis v0.0.0-20230331001040-c7cddc04b0f9
-	github.com/metal3-io/baremetal-operator/pkg/hardwareutils => github.com/openshift/baremetal-operator/pkg/hardwareutils v0.0.0-20230331001040-c7cddc04b0f9
+	github.com/metal3-io/baremetal-operator/pkg/hardwareutils => github.com/openshift/baremetal-operator/pkg/hardwareutils v0.0.0-20250226134025-307bd7fc9a71
 	github.com/openshift/assisted-service/api => ./api
 	github.com/openshift/assisted-service/cmd/agentbasedinstaller => ./cmd/agentbasedinstaller
 	github.com/openshift/assisted-service/models => ./models
