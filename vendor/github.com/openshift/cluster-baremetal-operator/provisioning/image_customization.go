@@ -18,6 +18,7 @@ package provisioning
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -34,7 +35,6 @@ import (
 
 const (
 	ironicBaseUrl                    = "IRONIC_BASE_URL"
-	ironicInspectorBaseUrl           = "IRONIC_INSPECTOR_BASE_URL"
 	ironicAgentImage                 = "IRONIC_AGENT_IMAGE"
 	imageCustomizationDeploymentName = "metal3-image-customization"
 	imageCustomizationVolume         = "metal3-image-customization-volume"
@@ -46,12 +46,22 @@ const (
 	deployISOFile                    = imageSharedDir + "/ironic-python-agent.iso"
 	deployInitrdEnvVar               = "DEPLOY_INITRD"
 	deployInitrdFile                 = imageSharedDir + "/ironic-python-agent.initramfs"
+	imageCustomizationConfigName     = "metal3-image-customization-config"
+	ironicAgentPullSecret            = "ironic-agent-pull-secret" // #nosec G101
+	ironicAgentPullSecretPath        = "/run/secrets/pull-secret" // #nosec G101
+	additionalNTPServers             = "ADDITIONAL_NTP_SERVERS"
 )
 
 var (
 	imageRegistriesVolumeMount = corev1.VolumeMount{
 		Name:      imageCustomizationVolume,
 		MountPath: containerRegistriesConfPath,
+	}
+	ironicAgentPullSecretMount = corev1.VolumeMount{
+		Name:      ironicAgentPullSecret,
+		MountPath: ironicAgentPullSecretPath,
+		SubPath:   PullSecretName,
+		ReadOnly:  true,
 	}
 )
 
@@ -70,21 +80,35 @@ func imageRegistriesVolume() corev1.Volume {
 	}
 }
 
-func getUrlFromIP(ipAddr string) string {
-	if strings.Contains(ipAddr, ":") {
-		// This is an IPv6 addr
-		return "https://" + fmt.Sprintf("[%s]", ipAddr)
-	}
-	if ipAddr != "" {
-		// This is an IPv4 addr
-		return "https://" + ipAddr
-	} else {
-		return ""
+func ironicAgentPullSecretVolume() corev1.Volume {
+	return corev1.Volume{
+		Name: ironicAgentPullSecret,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: PullSecretName,
+				Items: []corev1.KeyToPath{
+					{Key: openshiftConfigSecretKey, Path: PullSecretName},
+				},
+			},
+		},
 	}
 }
 
-func createImageCustomizationContainer(images *Images, info *ProvisioningInfo, ironicIPs []string, inspectorIPs []string) corev1.Container {
-	envVars := envWithProxy(info.Proxy, []corev1.EnvVar{}, ironicIPs[0]+","+inspectorIPs[0])
+func getUrlFromIP(ipAddrs []string, port int) string {
+	portString := fmt.Sprint(port)
+	var result []string
+	for _, ipAddr := range ipAddrs {
+		if ipAddr != "" {
+			result = append(result,
+				"https://"+net.JoinHostPort(ipAddr, portString))
+		}
+	}
+	return strings.Join(result, ",")
+}
+
+func createImageCustomizationContainer(images *Images, info *ProvisioningInfo, ironicIPs []string) corev1.Container {
+	noProxy := ironicIPs
+	envVars := envWithProxy(info.Proxy, []corev1.EnvVar{}, noProxy)
 
 	container := corev1.Container{
 		Name:  "machine-image-customization-controller",
@@ -98,11 +122,16 @@ func createImageCustomizationContainer(images *Images, info *ProvisioningInfo, i
 		// TODO: This container does not have to run in privileged mode when the i-c-c has
 		// its own volume and does not have to use the imageCacheSharedVolume
 		SecurityContext: &corev1.SecurityContext{
+			// Needed for hostPath image volume mount
 			Privileged: pointer.BoolPtr(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			imageRegistriesVolumeMount,
 			imageVolumeMount,
+			ironicAgentPullSecretMount,
 		},
 		ImagePullPolicy: "IfNotPresent",
 		Env: append(envVars, corev1.EnvVar{
@@ -115,11 +144,7 @@ func createImageCustomizationContainer(images *Images, info *ProvisioningInfo, i
 			},
 			corev1.EnvVar{
 				Name:  ironicBaseUrl,
-				Value: getUrlFromIP(ironicIPs[0]),
-			},
-			corev1.EnvVar{
-				Name:  ironicInspectorBaseUrl,
-				Value: getUrlFromIP(inspectorIPs[0]),
+				Value: getUrlFromIP(ironicIPs, baremetalIronicPort),
 			},
 			corev1.EnvVar{
 				Name:  ironicAgentImage,
@@ -133,8 +158,11 @@ func createImageCustomizationContainer(images *Images, info *ProvisioningInfo, i
 				Name:  ipOptions,
 				Value: info.NetworkStack.IpOption(),
 			},
-			buildSSHKeyEnvVar(info.SSHKey),
-			pullSecret),
+			corev1.EnvVar{
+				Name:  additionalNTPServers,
+				Value: strings.Join(info.ProvConfig.Spec.AdditionalNTPServers, ","),
+			},
+			buildSSHKeyEnvVar(info.SSHKey)),
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "http",
@@ -147,13 +175,14 @@ func createImageCustomizationContainer(images *Images, info *ProvisioningInfo, i
 				corev1.ResourceMemory: resource.MustParse("50Mi"),
 			},
 		},
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 	}
 	return container
 }
 
-func newImageCustomizationPodTemplateSpec(info *ProvisioningInfo, labels *map[string]string, ironicIPs []string, inspectorIPs []string) *corev1.PodTemplateSpec {
+func newImageCustomizationPodTemplateSpec(info *ProvisioningInfo, labels *map[string]string, ironicIPs []string) *corev1.PodTemplateSpec {
 	containers := []corev1.Container{
-		createImageCustomizationContainer(info.Images, info, ironicIPs, inspectorIPs),
+		createImageCustomizationContainer(info.Images, info, ironicIPs),
 	}
 
 	// Extract the pre-provisioning images from a container in the payload
@@ -204,12 +233,13 @@ func newImageCustomizationPodTemplateSpec(info *ProvisioningInfo, labels *map[st
 				imageRegistriesVolume(),
 				imageVolume(),
 				trustedCAVolume(),
+				ironicAgentPullSecretVolume(),
 			},
 		},
 	}
 }
 
-func newImageCustomizationDeployment(info *ProvisioningInfo, ironicIPs []string, inspectorIPs []string) *appsv1.Deployment {
+func newImageCustomizationDeployment(info *ProvisioningInfo, ironicIPs []string) *appsv1.Deployment {
 	selector := &metav1.LabelSelector{
 		MatchLabels: map[string]string{
 			"k8s-app":    metal3AppName,
@@ -220,7 +250,7 @@ func newImageCustomizationDeployment(info *ProvisioningInfo, ironicIPs []string,
 		"k8s-app":    metal3AppName,
 		cboLabelName: imageCustomizationService,
 	}
-	template := newImageCustomizationPodTemplateSpec(info, &podSpecLabels, ironicIPs, inspectorIPs)
+	template := newImageCustomizationPodTemplateSpec(info, &podSpecLabels, ironicIPs)
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        imageCustomizationDeploymentName,
@@ -239,13 +269,45 @@ func newImageCustomizationDeployment(info *ProvisioningInfo, ironicIPs []string,
 	}
 }
 
+func newImageCustomizationConfig(info *ProvisioningInfo, ironicIPs []string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        imageCustomizationConfigName,
+			Namespace:   info.Namespace,
+			Annotations: map[string]string{},
+			Labels: map[string]string{
+				"k8s-app":    metal3AppName,
+				cboLabelName: imageCustomizationService,
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			ironicAgentImage: info.Images.IronicAgent,
+			ironicBaseUrl:    getUrlFromIP(ironicIPs, baremetalIronicPort),
+			sshKeyEnvVar:     info.SSHKey,
+		},
+	}
+}
+
 func EnsureImageCustomizationDeployment(info *ProvisioningInfo) (updated bool, err error) {
-	ironicIPs, inspectorIPs, err := GetIronicIPs(*info)
+	ironicIPs, err := GetIronicIPs(info)
 	if err != nil {
 		return false, fmt.Errorf("unable to determine Ironic's IP to pass to the machine-image-customization-controller: %w", err)
 	}
 
-	imageCustomizationDeployment := newImageCustomizationDeployment(info, ironicIPs, inspectorIPs)
+	configSecret := newImageCustomizationConfig(info, ironicIPs)
+	err = controllerutil.SetControllerReference(info.ProvConfig, configSecret, info.Scheme)
+	if err != nil {
+		err = fmt.Errorf("unable to set controllerReference on machine-image-customization config: %w", err)
+		return
+	}
+	_, _, err = resourceapply.ApplySecret(
+		context.Background(), info.Client.CoreV1(), info.EventRecorder, configSecret)
+	if err != nil {
+		return false, fmt.Errorf("failed to create the image customization config: %w", err)
+	}
+
+	imageCustomizationDeployment := newImageCustomizationDeployment(info, ironicIPs)
 	expectedGeneration := resourcemerge.ExpectedDeploymentGeneration(imageCustomizationDeployment, info.ProvConfig.Status.Generations)
 	err = controllerutil.SetControllerReference(info.ProvConfig, imageCustomizationDeployment, info.Scheme)
 	if err != nil {
