@@ -16,12 +16,14 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"context"
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // log is for logging in this package.
@@ -36,27 +38,27 @@ func (r *Provisioning) SetupWebhookWithManager(mgr ctrl.Manager, features Enable
 }
 
 // https://golangbyexample.com/go-check-if-type-implements-interface/
-var _ webhook.Validator = &Provisioning{}
+var _ webhook.CustomValidator = &Provisioning{}
 
-// ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *Provisioning) ValidateCreate() error {
+// ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type
+func (r *Provisioning) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	provisioninglog.Info("validate create", "name", r.Name)
 
 	if r.Name != ProvisioningSingletonName {
-		return fmt.Errorf("Provisioning object is a singleton and must be named \"%s\"", ProvisioningSingletonName)
+		return nil, fmt.Errorf("Provisioning object is a singleton and must be named \"%s\"", ProvisioningSingletonName)
 	}
 
-	return r.ValidateBaremetalProvisioningConfig(enabledFeatures)
+	return nil, r.ValidateBaremetalProvisioningConfig(enabledFeatures)
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *Provisioning) ValidateUpdate(old runtime.Object) error {
+func (r *Provisioning) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	provisioninglog.Info("validate update", "name", r.Name)
-	return r.ValidateBaremetalProvisioningConfig(enabledFeatures)
+	return nil, r.ValidateBaremetalProvisioningConfig(enabledFeatures)
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (r *Provisioning) ValidateDelete() error {
+func (r *Provisioning) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	provisioninglog.Info("validate delete", "name", r.Name)
-	return nil
+	return nil, nil
 }
