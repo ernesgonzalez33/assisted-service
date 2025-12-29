@@ -20,25 +20,24 @@ import (
 	"net"
 	"strings"
 
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	metal3iov1alpha1 "github.com/openshift/cluster-baremetal-operator/api/v1alpha1"
 )
 
-var (
+const (
 	baremetalHttpPort              = "6180"
 	baremetalVmediaHttpsPort       = "6183"
 	baremetalWebhookPort           = "9447"
 	baremetalIronicPort            = 6385
-	baremetalIronicInspectorPort   = 5050
-	baremetalKernelUrlSubPath      = "images/ironic-python-agent.kernel"
+	baremetalMetricsPort           = 9608
+	baremetalKernelSubPath         = "ironic-python-agent.kernel"
 	baremetalIronicEndpointSubpath = "v1/"
 	provisioningIP                 = "PROVISIONING_IP"
 	provisioningInterface          = "PROVISIONING_INTERFACE"
 	provisioningMacAddresses       = "PROVISIONING_MACS"
 	deployKernelUrl                = "DEPLOY_KERNEL_URL"
 	ironicEndpoint                 = "IRONIC_ENDPOINT"
-	ironicInspectorEndpoint        = "IRONIC_INSPECTOR_ENDPOINT"
 	httpPort                       = "HTTP_PORT"
 	vmediaHttpsPort                = "VMEDIA_TLS_PORT"
 	dnsIP                          = "DNS_IP"
@@ -46,11 +45,16 @@ var (
 	machineImageUrl                = "RHCOS_IMAGE_URL"
 	ipOptions                      = "IP_OPTIONS"
 	bootIsoSource                  = "IRONIC_BOOT_ISO_SOURCE"
+	sendSensorData                 = "SEND_SENSOR_DATA"
+	sensorDataInterval             = "OS_SENSOR_DATA__INTERVAL"
 	useUnixSocket                  = "unix"
 	useProvisioningDNS             = "provisioning"
 )
 
 func getDHCPRange(config *metal3iov1alpha1.ProvisioningSpec) *string {
+	if config.ProvisioningNetwork != metal3iov1alpha1.ProvisioningNetworkManaged {
+		return nil
+	}
 	var dhcpRange string
 	if config.ProvisioningDHCPRange != "" {
 		_, net, err := net.ParseCIDR(config.ProvisioningNetworkCIDR)
@@ -62,7 +66,7 @@ func getDHCPRange(config *metal3iov1alpha1.ProvisioningSpec) *string {
 	return &dhcpRange
 }
 
-func getProvisioningIPCIDR(config *metal3iov1alpha1.ProvisioningSpec) *string {
+func getProvisioningIPWithPrefix(config *metal3iov1alpha1.ProvisioningSpec) *string {
 	if config.ProvisioningNetworkCIDR != "" && config.ProvisioningIP != "" {
 		_, net, err := net.ParseCIDR(config.ProvisioningNetworkCIDR)
 		if err == nil {
@@ -71,23 +75,39 @@ func getProvisioningIPCIDR(config *metal3iov1alpha1.ProvisioningSpec) *string {
 			return &ipCIDR
 		}
 	}
+
+	return nil
+}
+
+func getProvisioningIP(config *metal3iov1alpha1.ProvisioningSpec) *string {
+	if config.ProvisioningNetwork == metal3iov1alpha1.ProvisioningNetworkManaged {
+		return getProvisioningIPWithPrefix(config)
+	}
+
+	if config.ProvisioningIP != "" {
+		return &config.ProvisioningIP
+	}
 	return nil
 }
 
 func getDeployKernelUrl() *string {
-	// TODO(dtantsur): it's a share file system, we should look into using a file:// URL
-	deployKernelUrl := fmt.Sprintf("http://localhost:%s/%s", baremetalHttpPort, baremetalKernelUrlSubPath)
+	deployKernelUrl := fmt.Sprintf("file://%s/%s", imageSharedDir, baremetalKernelSubPath)
 	return &deployKernelUrl
 }
 
-func getIronicEndpoint() *string {
-	ironicEndpoint := fmt.Sprintf("https://localhost:%d/%s", baremetalIronicPort, baremetalIronicEndpointSubpath)
-	return &ironicEndpoint
+func getControlPlanePort(info *ProvisioningInfo) (ironicPort int) {
+	ironicPort = baremetalIronicPort
+	if UseIronicProxy(info) {
+		// Direct access to real services behind the proxy.
+		ironicPort = ironicPrivatePort
+	}
+	return
 }
 
-func getIronicInspectorEndpoint() *string {
-	ironicInspectorEndpoint := fmt.Sprintf("https://localhost:%d/%s", baremetalIronicInspectorPort, baremetalIronicEndpointSubpath)
-	return &ironicInspectorEndpoint
+func getControlPlaneEndpoint(info *ProvisioningInfo) (ironicEndpoint string) {
+	ironicPort := getControlPlanePort(info)
+	ironicEndpoint = fmt.Sprintf("https://%s.%s.svc.cluster.local:%d/%s", stateService, info.Namespace, ironicPort, baremetalIronicEndpointSubpath)
+	return
 }
 
 func getProvisioningOSDownloadURL(config *metal3iov1alpha1.ProvisioningSpec) *string {
@@ -107,21 +127,17 @@ func getBootIsoSource(config *metal3iov1alpha1.ProvisioningSpec) *string {
 func getMetal3DeploymentConfig(name string, baremetalConfig *metal3iov1alpha1.ProvisioningSpec) *string {
 	switch name {
 	case provisioningIP:
-		return getProvisioningIPCIDR(baremetalConfig)
+		return getProvisioningIP(baremetalConfig)
 	case provisioningInterface:
 		return &baremetalConfig.ProvisioningInterface
 	case provisioningMacAddresses:
-		return pointer.StringPtr(strings.Join(baremetalConfig.ProvisioningMacAddresses, ","))
+		return ptr.To(strings.Join(baremetalConfig.ProvisioningMacAddresses, ","))
 	case deployKernelUrl:
 		return getDeployKernelUrl()
-	case ironicEndpoint:
-		return getIronicEndpoint()
-	case ironicInspectorEndpoint:
-		return getIronicInspectorEndpoint()
 	case httpPort:
-		return pointer.StringPtr(baremetalHttpPort)
+		return ptr.To(baremetalHttpPort)
 	case vmediaHttpsPort:
-		return pointer.StringPtr(baremetalVmediaHttpsPort)
+		return ptr.To(baremetalVmediaHttpsPort)
 	case dhcpRange:
 		return getDHCPRange(baremetalConfig)
 	case machineImageUrl:

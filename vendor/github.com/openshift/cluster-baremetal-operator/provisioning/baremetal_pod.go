@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -28,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	appsclientv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
 	utilnet "k8s.io/utils/net"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -45,35 +46,30 @@ const (
 	metal3AuthRootDir                = "/auth"
 	metal3TlsRootDir                 = "/certs"
 	ironicCredentialsVolume          = "metal3-ironic-basic-auth"
-	inspectorCredentialsVolume       = "metal3-inspector-basic-auth"
 	ironicTlsVolume                  = "metal3-ironic-tls"
-	inspectorTlsVolume               = "metal3-inspector-tls"
 	vmediaTlsVolume                  = "metal3-vmedia-tls"
-	ironicHtpasswdEnvVar             = "IRONIC_HTPASSWD"    // #nosec
-	inspectorHtpasswdEnvVar          = "INSPECTOR_HTPASSWD" // #nosec
+	ironicPrometheusExporterName     = "metal3-ironic-prometheus-exporter"
 	ironicInsecureEnvVar             = "IRONIC_INSECURE"
-	inspectorInsecureEnvVar          = "IRONIC_INSPECTOR_INSECURE"
 	ironicKernelParamsEnvVar         = "IRONIC_KERNEL_PARAMS"
 	ironicCertEnvVar                 = "IRONIC_CACERT_FILE"
 	sshKeyEnvVar                     = "IRONIC_RAMDISK_SSH_KEY"
 	externalIpEnvVar                 = "IRONIC_EXTERNAL_IP"
 	externalUrlEnvVar                = "IRONIC_EXTERNAL_URL_V6"
 	ironicProxyEnvVar                = "IRONIC_REVERSE_PROXY_SETUP"
-	inspectorProxyEnvVar             = "INSPECTOR_REVERSE_PROXY_SETUP"
 	ironicPrivatePortEnvVar          = "IRONIC_PRIVATE_PORT"
-	inspectorPrivatePortEnvVar       = "IRONIC_INSPECTOR_PRIVATE_PORT"
 	ironicListenPortEnvVar           = "IRONIC_LISTEN_PORT"
-	inspectorListenPortEnvVar        = "IRONIC_INSPECTOR_LISTEN_PORT"
 	cboOwnedAnnotation               = "baremetal.openshift.io/owned"
 	cboLabelName                     = "baremetal.openshift.io/cluster-baremetal-operator"
 	externalTrustBundleConfigMapName = "cbo-trusted-ca"
-	pullSecretEnvVar                 = "IRONIC_AGENT_PULL_SECRET" // #nosec
-	// Default cert directory set by kubebuilder
-	baremetalWebhookCertMountPath = "/tmp/k8s-webhook-server/serving-certs"
-	baremetalWebhookCertVolume    = "cert"
-	baremetalWebhookSecretName    = "baremetal-operator-webhook-server-cert"
-	baremetalWebhookLabelName     = "baremetal.openshift.io/metal3-validating-webhook"
-	baremetalWebhookServiceLabel  = "metal3-validating-webhook"
+	ironicConfigVolume               = "metal3-ironic-conf"
+	ironicDataVolume                 = "metal3-ironic-data"
+	ironicConfigPath                 = "/conf"
+	ironicDataPath                   = "/data"
+	ironicTmpVolume                  = "metal3-ironic-tmp"
+	ironicTmpPath                    = "/tmp"
+	bmcCACertMountPath               = "/certs/ca/bmc"
+	bmcCACertConfigMapName           = "bmc-verify-ca"
+	bmcCACertVolume                  = "bmc-verify-ca"
 )
 
 var podTemplateAnnotations = map[string]string{
@@ -94,22 +90,25 @@ var ironicCredentialsMount = corev1.VolumeMount{
 	ReadOnly:  true,
 }
 
-var inspectorCredentialsMount = corev1.VolumeMount{
-	Name:      inspectorCredentialsVolume,
-	MountPath: metal3AuthRootDir + "/ironic-inspector",
-	ReadOnly:  true,
-}
-
 var ironicTlsMount = corev1.VolumeMount{
 	Name:      ironicTlsVolume,
 	MountPath: metal3TlsRootDir + "/ironic",
 	ReadOnly:  true,
 }
 
-var inspectorTlsMount = corev1.VolumeMount{
-	Name:      inspectorTlsVolume,
-	MountPath: metal3TlsRootDir + "/ironic-inspector",
-	ReadOnly:  true,
+var ironicConfigMount = corev1.VolumeMount{
+	Name:      ironicConfigVolume,
+	MountPath: ironicConfigPath,
+}
+
+var ironicDataMount = corev1.VolumeMount{
+	Name:      ironicDataVolume,
+	MountPath: ironicDataPath,
+}
+
+var ironicTmpMount = corev1.VolumeMount{
+	Name:      ironicTmpVolume,
+	MountPath: ironicTmpPath,
 }
 
 var vmediaTlsMount = corev1.VolumeMount{
@@ -118,22 +117,10 @@ var vmediaTlsMount = corev1.VolumeMount{
 	ReadOnly:  true,
 }
 
-var baremetalWebhookCertMount = corev1.VolumeMount{
-	Name:      baremetalWebhookCertVolume,
+var baremetalCACertMount = corev1.VolumeMount{
+	Name:      bmcCACertVolume,
 	ReadOnly:  true,
-	MountPath: baremetalWebhookCertMountPath,
-}
-
-var pullSecret = corev1.EnvVar{
-	Name: pullSecretEnvVar,
-	ValueFrom: &corev1.EnvVarSource{
-		SecretKeyRef: &corev1.SecretKeySelector{
-			LocalObjectReference: corev1.LocalObjectReference{
-				Name: pullSecretName,
-			},
-			Key: openshiftConfigSecretKey,
-		},
-	},
+	MountPath: bmcCACertMountPath,
 }
 
 func trustedCAVolume() corev1.Volume {
@@ -145,7 +132,7 @@ func trustedCAVolume() corev1.Volume {
 				LocalObjectReference: corev1.LocalObjectReference{
 					Name: externalTrustBundleConfigMapName,
 				},
-				Optional: pointer.BoolPtr(true),
+				Optional: ptr.To(true),
 			},
 		},
 	}
@@ -158,7 +145,27 @@ var metal3Volumes = []corev1.Volume{
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
 	},
+	{
+		Name: ironicConfigVolume,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	},
+	{
+		Name: ironicDataVolume,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	},
+	{
+		Name: ironicTmpVolume,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	},
 	imageVolume(),
+	ironicAgentPullSecretVolume(),
+	caTrustDirVolume(),
 	{
 		Name: ironicCredentialsVolume,
 		VolumeSource: corev1.VolumeSource{
@@ -167,7 +174,7 @@ var metal3Volumes = []corev1.Volume{
 				Items: []corev1.KeyToPath{
 					{Key: ironicUsernameKey, Path: ironicUsernameKey},
 					{Key: ironicPasswordKey, Path: ironicPasswordKey},
-					{Key: ironicConfigKey, Path: ironicConfigKey},
+					{Key: ironicHtpasswdKey, Path: ironicHtpasswdKey},
 				},
 			},
 		},
@@ -180,30 +187,20 @@ var metal3Volumes = []corev1.Volume{
 			},
 		},
 	},
-	{
-		Name: inspectorCredentialsVolume,
-		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName: inspectorSecretName,
-				Items: []corev1.KeyToPath{
-					{Key: ironicUsernameKey, Path: ironicUsernameKey},
-					{Key: ironicPasswordKey, Path: ironicPasswordKey},
-					{Key: ironicConfigKey, Path: ironicConfigKey},
-				},
-			},
-		},
-	},
 	trustedCAVolume(),
 	{
-		Name: ironicTlsVolume,
+		Name: bmcCACertVolume,
 		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName: tlsSecretName,
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: bmcCACertConfigMapName,
+				},
+				Optional: ptr.To(true),
 			},
 		},
 	},
 	{
-		Name: inspectorTlsVolume,
+		Name: ironicTlsVolume,
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName: tlsSecretName,
@@ -227,7 +224,8 @@ func buildEnvVar(name string, baremetalProvisioningConfig *metal3iov1alpha1.Prov
 			Name:  name,
 			Value: *value,
 		}
-	} else if name == provisioningIP && baremetalProvisioningConfig.ProvisioningNetwork == metal3iov1alpha1.ProvisioningNetworkDisabled {
+	} else if name == provisioningIP && baremetalProvisioningConfig.ProvisioningNetwork == metal3iov1alpha1.ProvisioningNetworkDisabled &&
+		baremetalProvisioningConfig.ProvisioningInterface == "" {
 		return corev1.EnvVar{
 			Name: name,
 			ValueFrom: &corev1.EnvVarSource{
@@ -249,22 +247,13 @@ func getKernelParams(config *metal3iov1alpha1.ProvisioningSpec, networkStack Net
 		IpOptionForProvisioning(config, networkStack))
 }
 
-func setIronicHtpasswdHash(name string, secretName string) corev1.EnvVar {
-	return corev1.EnvVar{
-		Name: name,
-		ValueFrom: &corev1.EnvVarSource{
-			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: secretName,
-				},
-				Key: ironicHtpasswdKey,
-			},
-		},
-	}
-}
-
 func setIronicExternalIp(name string, config *metal3iov1alpha1.ProvisioningSpec) corev1.EnvVar {
-	if config.ProvisioningNetwork != metal3iov1alpha1.ProvisioningNetworkDisabled && config.VirtualMediaViaExternalNetwork {
+	if len(config.ExternalIPs) > 0 {
+		return corev1.EnvVar{
+			Name:  name,
+			Value: config.ExternalIPs[0],
+		}
+	} else if config.ProvisioningNetwork != metal3iov1alpha1.ProvisioningNetworkDisabled && config.VirtualMediaViaExternalNetwork {
 		return corev1.EnvVar{
 			Name: name,
 			ValueFrom: &corev1.EnvVarSource{
@@ -279,35 +268,22 @@ func setIronicExternalIp(name string, config *metal3iov1alpha1.ProvisioningSpec)
 	}
 }
 
-func setIronicExternalUrl(info ProvisioningInfo) (corev1.EnvVar, error) {
-	// We need to set the external URL to point to the ironic-proxy when IPv6
-	// is enabled and the proxy is present
-
-	if !UseIronicProxy(&info.ProvConfig.Spec) {
-		return corev1.EnvVar{
-			Name: externalUrlEnvVar,
-		}, nil
-	}
-
-	ironicIPs, _, err := GetIronicIPs(info)
-
-	if err != nil {
-		return corev1.EnvVar{}, fmt.Errorf("Failed to get Ironic IP when setting external url: %w", err)
-	}
-
+func setIronicExternalIPv6(info *ProvisioningInfo) (corev1.EnvVar, error) {
 	var ironicIPv6 string
 
-	for _, ironicIP := range ironicIPs {
-		if utilnet.IsIPv6String(ironicIP) {
-			ironicIPv6 = ironicIP
-			break
+	imageServerIPs, err := GetImageServerIPs(info)
+	if len(imageServerIPs) > 0 {
+		for _, imgServerIP := range imageServerIPs {
+			if utilnet.IsIPv6String(imgServerIP) {
+				ironicIPv6 = imgServerIP
+				break
+			}
 		}
 	}
-
-	if ironicIPv6 == "" {
+	if err != nil || ironicIPv6 == "" {
 		return corev1.EnvVar{
 			Name: externalUrlEnvVar,
-		}, nil
+		}, err
 	}
 
 	// protocol, host, port
@@ -337,7 +313,7 @@ func newMetal3InitContainers(info *ProvisioningInfo) []corev1.Container {
 	}
 
 	// Extract the pre-provisioning images from a container in the payload
-	initContainers = append(initContainers, createInitContainerMachineOSImages(info, "--all", imageVolumeMount, imageSharedDir))
+	initContainers = append(initContainers, createInitContainerMachineOSImages(info, "--pxe", imageVolumeMount, imageSharedDir))
 
 	// If the ProvisioningOSDownloadURL is set, we download the URL specified in it
 	if info.ProvConfig.Spec.ProvisioningOSDownloadURL != "" {
@@ -376,9 +352,14 @@ func createInitContainerMachineOsDownloader(info *ProvisioningInfo, imageURLs st
 		Command:         []string{command},
 		ImagePullPolicy: "IfNotPresent",
 		SecurityContext: &corev1.SecurityContext{
-			Privileged: pointer.BoolPtr(true),
+			ReadOnlyRootFilesystem: ptr.To(true),
+			// Needed for hostPath image volume mount
+			Privileged: ptr.To(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
 		},
-		VolumeMounts: []corev1.VolumeMount{imageVolumeMount},
+		VolumeMounts: []corev1.VolumeMount{imageVolumeMount, sharedVolumeMount},
 		Env:          env,
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
@@ -386,6 +367,7 @@ func createInitContainerMachineOsDownloader(info *ProvisioningInfo, imageURLs st
 				corev1.ResourceMemory: resource.MustParse("50Mi"),
 			},
 		},
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 	}
 	return initContainer
 }
@@ -397,7 +379,11 @@ func createInitContainerStaticIpSet(images *Images, config *metal3iov1alpha1.Pro
 		Command:         []string{"/set-static-ip"},
 		ImagePullPolicy: "IfNotPresent",
 		SecurityContext: &corev1.SecurityContext{
-			Privileged: pointer.BoolPtr(true),
+			ReadOnlyRootFilesystem: ptr.To(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+				Add:  []corev1.Capability{"NET_ADMIN"},
+			},
 		},
 		Env: []corev1.EnvVar{
 			buildEnvVar(provisioningIP, config),
@@ -410,22 +396,17 @@ func createInitContainerStaticIpSet(images *Images, config *metal3iov1alpha1.Pro
 				corev1.ResourceMemory: resource.MustParse("50Mi"),
 			},
 		},
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 	}
 
 	return initContainer
 }
 
-func newMetal3Containers(info *ProvisioningInfo) ([]corev1.Container, error) {
-	bmo, err := createContainerMetal3BaremetalOperator(*info)
-	if err != nil {
-		return []corev1.Container{}, err
-	}
+func newMetal3Containers(info *ProvisioningInfo) []corev1.Container {
 	containers := []corev1.Container{
-		bmo,
-		createContainerMetal3Httpd(info.Images, &info.ProvConfig.Spec, info.SSHKey),
+		createContainerMetal3Httpd(info.Images, info),
 		createContainerMetal3Ironic(info.Images, info, &info.ProvConfig.Spec, info.SSHKey),
 		createContainerMetal3RamdiskLogs(info.Images),
-		createContainerMetal3IronicInspector(info.Images, info, &info.ProvConfig.Spec),
 	}
 
 	// If the provisioning network is disabled, and the user hasn't requested a
@@ -439,7 +420,12 @@ func newMetal3Containers(info *ProvisioningInfo) ([]corev1.Container, error) {
 		containers = append(containers, createContainerMetal3Dnsmasq(info.Images, &info.ProvConfig.Spec))
 	}
 
-	return injectProxyAndCA(containers, info.Proxy), nil
+	// Optionally deploy IPE
+	if info.ProvConfig.Spec.PrometheusExporter != nil && info.ProvConfig.Spec.PrometheusExporter.Enabled {
+		containers = append(containers, createContainerIronicPrometheusExporter(info.Images))
+	}
+
+	return injectProxyAndCA(containers, info.Proxy)
 }
 
 func getWatchNamespace(config *metal3iov1alpha1.ProvisioningSpec) corev1.EnvVar {
@@ -464,99 +450,6 @@ func buildSSHKeyEnvVar(sshKey string) corev1.EnvVar {
 	return corev1.EnvVar{Name: sshKeyEnvVar, Value: sshKey}
 }
 
-func createContainerMetal3BaremetalOperator(info ProvisioningInfo) (corev1.Container, error) {
-	webhookPort, _ := strconv.ParseInt(baremetalWebhookPort, 10, 32) // #nosec
-	externalUrlVar, err := setIronicExternalUrl(info)
-	if err != nil {
-		return corev1.Container{}, err
-	}
-	container := corev1.Container{
-		Name:  "metal3-baremetal-operator",
-		Image: info.Images.BaremetalOperator,
-		Ports: []corev1.ContainerPort{
-			{
-				Name:          "metrics",
-				ContainerPort: 60000,
-				HostPort:      60000,
-			},
-			{
-				Name:          "webhook-server",
-				HostPort:      int32(webhookPort),
-				ContainerPort: int32(webhookPort),
-			},
-		},
-		Command:         []string{"/baremetal-operator"},
-		Args:            []string{"--health-addr", ":9446", "-build-preprov-image"},
-		ImagePullPolicy: "IfNotPresent",
-		VolumeMounts: []corev1.VolumeMount{
-			ironicCredentialsMount,
-			inspectorCredentialsMount,
-			ironicTlsMount,
-			baremetalWebhookCertMount,
-		},
-		Env: []corev1.EnvVar{
-			getWatchNamespace(&info.ProvConfig.Spec),
-			{
-				Name: "POD_NAMESPACE",
-				ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "metadata.namespace",
-					},
-				},
-			},
-			{
-				Name: "POD_NAME",
-				ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "metadata.name",
-					},
-				},
-			},
-			{
-				Name:  "OPERATOR_NAME",
-				Value: "baremetal-operator",
-			},
-			{
-				Name:  ironicCertEnvVar,
-				Value: metal3TlsRootDir + "/ironic/" + corev1.TLSCertKey,
-			},
-			{
-				Name:  ironicInsecureEnvVar,
-				Value: "true",
-			},
-			buildEnvVar(deployKernelUrl, &info.ProvConfig.Spec),
-			buildEnvVar(ironicEndpoint, &info.ProvConfig.Spec),
-			buildEnvVar(ironicInspectorEndpoint, &info.ProvConfig.Spec),
-			{
-				Name:  "LIVE_ISO_FORCE_PERSISTENT_BOOT_DEVICE",
-				Value: "Never",
-			},
-			{
-				Name:  "METAL3_AUTH_ROOT_DIR",
-				Value: metal3AuthRootDir,
-			},
-			setIronicExternalIp(externalIpEnvVar, &info.ProvConfig.Spec),
-			externalUrlVar,
-		},
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("20m"),
-				corev1.ResourceMemory: resource.MustParse("50Mi"),
-			},
-		},
-	}
-
-	if !info.BaremetalWebhookEnabled {
-		// Webhook dependencies are not ready, thus we disable webhook explicitly,
-		// since default is enabled.
-		container.Args = append(container.Args, "--webhook-port", "0")
-	} else {
-		container.Args = append(container.Args, "--webhook-port", baremetalWebhookPort)
-	}
-
-	return container, nil
-}
-
 func createContainerMetal3Dnsmasq(images *Images, config *metal3iov1alpha1.ProvisioningSpec) corev1.Container {
 	envVars := []corev1.EnvVar{
 		buildEnvVar(httpPort, config),
@@ -575,12 +468,24 @@ func createContainerMetal3Dnsmasq(images *Images, config *metal3iov1alpha1.Provi
 		Image:           images.Ironic,
 		ImagePullPolicy: "IfNotPresent",
 		SecurityContext: &corev1.SecurityContext{
-			Privileged: pointer.BoolPtr(true),
+			ReadOnlyRootFilesystem: ptr.To(true),
+			// Needed for hostPath image volume mount
+			Privileged: ptr.To(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+				Add: []corev1.Capability{
+					"NET_ADMIN",
+					"NET_RAW",
+					"NET_BIND_SERVICE",
+				},
+			},
 		},
 		Command: []string{"/bin/rundnsmasq"},
 		VolumeMounts: []corev1.VolumeMount{
 			sharedVolumeMount,
 			imageVolumeMount,
+			ironicConfigMount,
+			ironicDataMount,
 		},
 		Env: envVars,
 		Resources: corev1.ResourceRequirements{
@@ -589,43 +494,38 @@ func createContainerMetal3Dnsmasq(images *Images, config *metal3iov1alpha1.Provi
 				corev1.ResourceMemory: resource.MustParse("5Mi"),
 			},
 		},
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 	}
 
 	return container
 }
 
-func createContainerMetal3Httpd(images *Images, config *metal3iov1alpha1.ProvisioningSpec, sshKey string) corev1.Container {
+func createContainerMetal3Httpd(images *Images, info *ProvisioningInfo) corev1.Container {
 	port, _ := strconv.Atoi(baremetalHttpPort)             // #nosec
 	httpsPort, _ := strconv.Atoi(baremetalVmediaHttpsPort) // #nosec
 
 	ironicPort := baremetalIronicPort
-	inspectorPort := baremetalIronicInspectorPort
 	// In the proxy mode, the ironic API is served on the private port,
 	// while ironic-proxy, running as a DeamonSet on all nodes, serves on
-	// 6385 and proxies the traffic (same for inspector).
-	if UseIronicProxy(config) {
+	// 6385 and proxies the traffic.
+	if UseIronicProxy(info) {
 		ironicPort = ironicPrivatePort
-		inspectorPort = inspectorPrivatePort
 	}
+	config := &info.ProvConfig.Spec
 
-	volumes := []corev1.VolumeMount{
+	volumeMounts := []corev1.VolumeMount{
 		sharedVolumeMount,
 		ironicCredentialsMount,
-		inspectorCredentialsMount,
 		imageVolumeMount,
 		ironicTlsMount,
-		inspectorTlsMount,
+		ironicDataMount,
+		ironicConfigMount,
 	}
 	ports := []corev1.ContainerPort{
 		{
 			Name:          "ironic",
 			ContainerPort: int32(ironicPort),
 			HostPort:      int32(ironicPort),
-		},
-		{
-			Name:          "inspector",
-			ContainerPort: int32(inspectorPort),
-			HostPort:      int32(inspectorPort),
 		},
 		{
 			Name:          httpPortName,
@@ -635,7 +535,7 @@ func createContainerMetal3Httpd(images *Images, config *metal3iov1alpha1.Provisi
 	}
 
 	if !config.DisableVirtualMediaTLS {
-		volumes = append(volumes, vmediaTlsMount)
+		volumeMounts = append(volumeMounts, vmediaTlsMount)
 		ports = append(ports, corev1.ContainerPort{
 			Name:          vmediaHttpsPortName,
 			ContainerPort: int32(httpsPort),
@@ -648,25 +548,24 @@ func createContainerMetal3Httpd(images *Images, config *metal3iov1alpha1.Provisi
 		Image:           images.Ironic,
 		ImagePullPolicy: "IfNotPresent",
 		SecurityContext: &corev1.SecurityContext{
-			Privileged: pointer.BoolPtr(true),
+			ReadOnlyRootFilesystem: ptr.To(true),
+			// Needed for hostPath image volume mount
+			Privileged: ptr.To(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
 		},
 		Command:      []string{"/bin/runhttpd"},
-		VolumeMounts: volumes,
+		VolumeMounts: volumeMounts,
 		Env: []corev1.EnvVar{
 			buildEnvVar(httpPort, config),
 			buildEnvVar(provisioningIP, config),
 			buildEnvVar(provisioningInterface, config),
-			buildSSHKeyEnvVar(sshKey),
+			buildSSHKeyEnvVar(info.SSHKey),
 			buildEnvVar(provisioningMacAddresses, config),
 			buildEnvVar(vmediaHttpsPort, config),
-			setIronicHtpasswdHash(ironicHtpasswdEnvVar, ironicSecretName),
-			setIronicHtpasswdHash(inspectorHtpasswdEnvVar, inspectorSecretName),
 			{
 				Name:  ironicProxyEnvVar,
-				Value: "true",
-			},
-			{
-				Name:  inspectorProxyEnvVar,
 				Value: "true",
 			},
 			{
@@ -674,16 +573,8 @@ func createContainerMetal3Httpd(images *Images, config *metal3iov1alpha1.Provisi
 				Value: useUnixSocket,
 			},
 			{
-				Name:  inspectorPrivatePortEnvVar,
-				Value: useUnixSocket,
-			},
-			{
 				Name:  ironicListenPortEnvVar,
 				Value: fmt.Sprint(ironicPort),
-			},
-			{
-				Name:  inspectorListenPortEnvVar,
-				Value: fmt.Sprint(inspectorPort),
 			},
 		},
 		Ports: ports,
@@ -693,6 +584,7 @@ func createContainerMetal3Httpd(images *Images, config *metal3iov1alpha1.Provisi
 				corev1.ResourceMemory: resource.MustParse("50Mi"),
 			},
 		},
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 	}
 
 	return container
@@ -702,9 +594,11 @@ func createContainerMetal3Ironic(images *Images, info *ProvisioningInfo, config 
 	volumes := []corev1.VolumeMount{
 		sharedVolumeMount,
 		imageVolumeMount,
-		inspectorCredentialsMount,
 		ironicTlsMount,
-		inspectorTlsMount,
+		ironicDataMount,
+		ironicConfigMount,
+		ironicTmpMount,
+		baremetalCACertMount,
 	}
 	if !config.DisableVirtualMediaTLS {
 		volumes = append(volumes, vmediaTlsMount)
@@ -715,17 +609,18 @@ func createContainerMetal3Ironic(images *Images, info *ProvisioningInfo, config 
 		Image:           images.Ironic,
 		ImagePullPolicy: "IfNotPresent",
 		SecurityContext: &corev1.SecurityContext{
-			Privileged: pointer.BoolPtr(true),
+			ReadOnlyRootFilesystem: ptr.To(true),
+			// Needed for hostPath image volume mount
+			Privileged: ptr.To(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
 		},
 		Command:      []string{"/bin/runironic"},
 		VolumeMounts: volumes,
 		Env: []corev1.EnvVar{
 			{
 				Name:  ironicInsecureEnvVar,
-				Value: "true",
-			},
-			{
-				Name:  inspectorInsecureEnvVar,
 				Value: "true",
 			},
 			{
@@ -754,6 +649,21 @@ func createContainerMetal3Ironic(images *Images, info *ProvisioningInfo, config 
 				corev1.ResourceMemory: resource.MustParse("500Mi"),
 			},
 		},
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+	}
+
+	// Append SEND_SENSOR_DATA and OS_SENSOR_DATA__INTERVAL env vars only when metrics collection is requested
+	if config.PrometheusExporter != nil && config.PrometheusExporter.Enabled {
+		container.Env = append(container.Env,
+			corev1.EnvVar{
+				Name:  sendSensorData,
+				Value: "true",
+			},
+			corev1.EnvVar{
+				Name:  sensorDataInterval,
+				Value: strconv.Itoa(config.PrometheusExporter.SensorCollectionInterval),
+			},
+		)
 	}
 
 	return container
@@ -764,66 +674,58 @@ func createContainerMetal3RamdiskLogs(images *Images) corev1.Container {
 		Name:            "metal3-ramdisk-logs",
 		Image:           images.Ironic,
 		ImagePullPolicy: "IfNotPresent",
-		SecurityContext: &corev1.SecurityContext{
-			Privileged: pointer.BoolPtr(true),
-		},
-		Command:      []string{"/bin/runlogwatch.sh"},
-		VolumeMounts: []corev1.VolumeMount{sharedVolumeMount},
+		Command:         []string{"/bin/runlogwatch.sh"},
+		VolumeMounts:    []corev1.VolumeMount{sharedVolumeMount},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("10m"),
 				corev1.ResourceMemory: resource.MustParse("5Mi"),
 			},
 		},
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+		SecurityContext: &corev1.SecurityContext{
+			ReadOnlyRootFilesystem: ptr.To(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+				Add: []corev1.Capability{
+					"CAP_DAC_OVERRIDE",
+				},
+			},
+		},
 	}
 	return container
 }
 
-func createContainerMetal3IronicInspector(images *Images, info *ProvisioningInfo, config *metal3iov1alpha1.ProvisioningSpec) corev1.Container {
-	container := corev1.Container{
-		Name:            "metal3-ironic-inspector",
+// createContainerIronicPrometheusExporter creates IPE container that services the /metrics endpoint
+// which Prometheus can scrape to collect generated metrics from sensors
+func createContainerIronicPrometheusExporter(images *Images) corev1.Container {
+	return corev1.Container{
+		Name:            ironicPrometheusExporterName,
 		Image:           images.Ironic,
 		ImagePullPolicy: "IfNotPresent",
-		SecurityContext: &corev1.SecurityContext{
-			Privileged: pointer.BoolPtr(true),
-		},
-		Command: []string{"/bin/runironic-inspector"},
-		VolumeMounts: []corev1.VolumeMount{
-			sharedVolumeMount,
-			ironicCredentialsMount,
-			ironicTlsMount,
-			inspectorTlsMount,
-		},
-		Env: []corev1.EnvVar{
+		Command:         []string{"/bin/runironic-exporter"},
+		VolumeMounts:    []corev1.VolumeMount{sharedVolumeMount},
+		Ports: []corev1.ContainerPort{
 			{
-				Name:  ironicInsecureEnvVar,
-				Value: "true",
+				Name:          metricsPortName,
+				ContainerPort: int32(baremetalMetricsPort),
+				Protocol:      corev1.ProtocolTCP,
 			},
-			{
-				Name:  ironicKernelParamsEnvVar,
-				Value: getKernelParams(&info.ProvConfig.Spec, info.NetworkStack),
-			},
-			{
-				Name:  inspectorProxyEnvVar,
-				Value: "true",
-			},
-			{
-				Name:  inspectorPrivatePortEnvVar,
-				Value: useUnixSocket,
-			},
-			buildEnvVar(provisioningIP, config),
-			buildEnvVar(provisioningInterface, config),
-			buildEnvVar(provisioningMacAddresses, config),
 		},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("40m"),
+				corev1.ResourceCPU:    resource.MustParse("20m"),
 				corev1.ResourceMemory: resource.MustParse("100Mi"),
 			},
 		},
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+		SecurityContext: &corev1.SecurityContext{
+			Privileged: ptr.To(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+		},
 	}
-
-	return container
 }
 
 func createContainerMetal3StaticIpManager(images *Images, config *metal3iov1alpha1.ProvisioningSpec) corev1.Container {
@@ -833,7 +735,16 @@ func createContainerMetal3StaticIpManager(images *Images, config *metal3iov1alph
 		Command:         []string{"/refresh-static-ip"},
 		ImagePullPolicy: "IfNotPresent",
 		SecurityContext: &corev1.SecurityContext{
-			Privileged: pointer.BoolPtr(true),
+			ReadOnlyRootFilesystem: ptr.To(true),
+			// Needed for mounting /proc to set the addr_gen_mode
+			Privileged: ptr.To(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+				Add: []corev1.Capability{
+					"NET_ADMIN",
+					"FOWNER", // Needed for setting the addr_gen_mode
+				},
+			},
 		},
 		Env: []corev1.EnvVar{
 			buildEnvVar(provisioningIP, config),
@@ -846,17 +757,15 @@ func createContainerMetal3StaticIpManager(images *Images, config *metal3iov1alph
 				corev1.ResourceMemory: resource.MustParse("50Mi"),
 			},
 		},
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 	}
 
 	return container
 }
 
-func newMetal3PodTemplateSpec(info *ProvisioningInfo, labels *map[string]string) (*corev1.PodTemplateSpec, error) {
+func newMetal3PodTemplateSpec(info *ProvisioningInfo, labels *map[string]string) *corev1.PodTemplateSpec {
 	initContainers := newMetal3InitContainers(info)
-	containers, err := newMetal3Containers(info)
-	if err != nil {
-		return nil, err
-	}
+	containers := newMetal3Containers(info)
 	tolerations := []corev1.Toleration{
 		{
 			Key:      "node-role.kubernetes.io/master",
@@ -871,14 +780,19 @@ func newMetal3PodTemplateSpec(info *ProvisioningInfo, labels *map[string]string)
 			Key:               "node.kubernetes.io/not-ready",
 			Effect:            corev1.TaintEffectNoExecute,
 			Operator:          corev1.TolerationOpExists,
-			TolerationSeconds: pointer.Int64Ptr(120),
+			TolerationSeconds: ptr.To[int64](120),
 		},
 		{
 			Key:               "node.kubernetes.io/unreachable",
 			Effect:            corev1.TaintEffectNoExecute,
 			Operator:          corev1.TolerationOpExists,
-			TolerationSeconds: pointer.Int64Ptr(120),
+			TolerationSeconds: ptr.To[int64](120),
 		},
+	}
+
+	nodeSelector := map[string]string{}
+	if !info.IsHyperShift {
+		nodeSelector = map[string]string{"node-role.kubernetes.io/master": ""}
 	}
 
 	return &corev1.PodTemplateSpec{
@@ -893,14 +807,14 @@ func newMetal3PodTemplateSpec(info *ProvisioningInfo, labels *map[string]string)
 			HostNetwork:       true,
 			DNSPolicy:         corev1.DNSClusterFirstWithHostNet,
 			PriorityClassName: "system-node-critical",
-			NodeSelector:      map[string]string{"node-role.kubernetes.io/master": ""},
+			NodeSelector:      nodeSelector,
 			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: pointer.BoolPtr(false),
+				RunAsNonRoot: ptr.To(false),
 			},
 			ServiceAccountName: "cluster-baremetal-operator",
 			Tolerations:        tolerations,
 		},
-	}, nil
+	}
 }
 
 func mountsWithTrustedCA(mounts []corev1.VolumeMount) []corev1.VolumeMount {
@@ -917,7 +831,7 @@ func injectProxyAndCA(containers []corev1.Container, proxy *configv1.Proxy) []co
 	var injectedContainers []corev1.Container
 
 	for _, container := range containers {
-		container.Env = envWithProxy(proxy, container.Env, "")
+		container.Env = envWithProxy(proxy, container.Env, nil)
 		container.VolumeMounts = mountsWithTrustedCA(container.VolumeMounts)
 		injectedContainers = append(injectedContainers, container)
 	}
@@ -925,7 +839,7 @@ func injectProxyAndCA(containers []corev1.Container, proxy *configv1.Proxy) []co
 	return injectedContainers
 }
 
-func envWithProxy(proxy *configv1.Proxy, envVars []corev1.EnvVar, noproxy string) []corev1.EnvVar {
+func envWithProxy(proxy *configv1.Proxy, envVars []corev1.EnvVar, noproxy []string) []corev1.EnvVar {
 	if proxy == nil {
 		return envVars
 	}
@@ -942,33 +856,28 @@ func envWithProxy(proxy *configv1.Proxy, envVars []corev1.EnvVar, noproxy string
 			Value: proxy.Status.HTTPSProxy,
 		})
 	}
-	if proxy.Status.NoProxy != "" || noproxy != "" {
+	if proxy.Status.NoProxy != "" || noproxy != nil {
 		envVars = append(envVars, corev1.EnvVar{
 			Name:  "NO_PROXY",
-			Value: proxy.Status.NoProxy + "," + noproxy,
+			Value: proxy.Status.NoProxy + "," + strings.Join(noproxy, ","),
 		})
 	}
 
 	return envVars
 }
 
-func newMetal3Deployment(info *ProvisioningInfo) (*appsv1.Deployment, error) {
+func newMetal3Deployment(info *ProvisioningInfo) *appsv1.Deployment {
 	selector := &metav1.LabelSelector{
 		MatchLabels: map[string]string{
-			"k8s-app":                 metal3AppName,
-			cboLabelName:              stateService,
-			baremetalWebhookLabelName: baremetalWebhookServiceLabel,
+			"k8s-app":    metal3AppName,
+			cboLabelName: stateService,
 		},
 	}
 	podSpecLabels := map[string]string{
-		"k8s-app":                 metal3AppName,
-		cboLabelName:              stateService,
-		baremetalWebhookLabelName: baremetalWebhookServiceLabel,
+		"k8s-app":    metal3AppName,
+		cboLabelName: stateService,
 	}
-	template, err := newMetal3PodTemplateSpec(info, &podSpecLabels)
-	if err != nil {
-		return nil, err
-	}
+	template := newMetal3PodTemplateSpec(info, &podSpecLabels)
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      baremetalDeploymentName,
@@ -977,20 +886,19 @@ func newMetal3Deployment(info *ProvisioningInfo) (*appsv1.Deployment, error) {
 				cboOwnedAnnotation: "",
 			},
 			Labels: map[string]string{
-				"k8s-app":                 metal3AppName,
-				cboLabelName:              stateService,
-				baremetalWebhookLabelName: baremetalWebhookServiceLabel,
+				"k8s-app":    metal3AppName,
+				cboLabelName: stateService,
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: pointer.Int32Ptr(1),
+			Replicas: ptr.To[int32](1),
 			Selector: selector,
 			Template: *template,
 			Strategy: appsv1.DeploymentStrategy{
 				Type: appsv1.RecreateDeploymentStrategyType,
 			},
 		},
-	}, nil
+	}
 }
 
 func getMetal3DeploymentSelector(client appsclientv1.DeploymentsGetter, targetNamespace string) (*metav1.LabelSelector, error) {
@@ -1005,11 +913,7 @@ func EnsureMetal3Deployment(info *ProvisioningInfo) (updated bool, err error) {
 	// Create metal3 deployment object based on current baremetal configuration
 	// It will be created with the cboOwnedAnnotation
 
-	metal3Deployment, err := newMetal3Deployment(info)
-	if err != nil {
-		err = fmt.Errorf("unable to create a metal3 deployment: %w", err)
-		return
-	}
+	metal3Deployment := newMetal3Deployment(info)
 
 	expectedGeneration := resourcemerge.ExpectedDeploymentGeneration(metal3Deployment, info.ProvConfig.Status.Generations)
 

@@ -12,7 +12,22 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openshift/library-go/pkg/operator/events"
+	"github.com/openshift/library-go/pkg/operator/resource/resourcehelper"
 	"github.com/openshift/library-go/pkg/operator/resource/resourcemerge"
+)
+
+const (
+	// Label on the CSIDriver to declare the driver's effective pod security profile
+	csiInlineVolProfileLabel = "security.openshift.io/csi-ephemeral-volume-profile"
+
+	defaultScAnnotationKey = "storageclass.kubernetes.io/is-default-class"
+)
+
+var (
+	// Exempt labels are not overwritten if the value has changed
+	exemptCSIDriverLabels = []string{
+		csiInlineVolProfileLabel,
+	}
 )
 
 // ApplyStorageClass merges objectmeta, tries to write everything else
@@ -23,17 +38,33 @@ func ApplyStorageClass(ctx context.Context, client storageclientv1.StorageClasse
 		requiredCopy := required.DeepCopy()
 		actual, err := client.StorageClasses().Create(
 			ctx, resourcemerge.WithCleanLabelsAndAnnotations(requiredCopy).(*storagev1.StorageClass), metav1.CreateOptions{})
-		reportCreateEvent(recorder, required, err)
+		resourcehelper.ReportCreateEvent(recorder, required, err)
 		return actual, true, err
 	}
 	if err != nil {
 		return nil, false, err
 	}
 
+	if required.ObjectMeta.ResourceVersion != "" && required.ObjectMeta.ResourceVersion != existing.ObjectMeta.ResourceVersion {
+		err = fmt.Errorf("rejected to update StorageClass %s because the object has been modified: desired/actual ResourceVersion: %v/%v",
+			required.Name, required.ObjectMeta.ResourceVersion, existing.ObjectMeta.ResourceVersion)
+		return nil, false, err
+	}
+	// Our caller may not be able to set required.ObjectMeta.ResourceVersion. We only want to overwrite value of
+	// default storage class annotation if it is missing in existing.Annotations
+	if existing.Annotations != nil {
+		if _, ok := existing.Annotations[defaultScAnnotationKey]; ok {
+			if required.Annotations == nil {
+				required.Annotations = make(map[string]string)
+			}
+			required.Annotations[defaultScAnnotationKey] = existing.Annotations[defaultScAnnotationKey]
+		}
+	}
+
 	// First, let's compare ObjectMeta from both objects
-	modified := resourcemerge.BoolPtr(false)
+	modified := false
 	existingCopy := existing.DeepCopy()
-	resourcemerge.EnsureObjectMeta(modified, &existingCopy.ObjectMeta, required.ObjectMeta)
+	resourcemerge.EnsureObjectMeta(&modified, &existingCopy.ObjectMeta, required.ObjectMeta)
 
 	// Second, let's compare the other fields. StorageClass doesn't have a spec and we don't
 	// want to miss fields, so we have to copy required to get all fields
@@ -43,18 +74,18 @@ func ApplyStorageClass(ctx context.Context, client storageclientv1.StorageClasse
 	requiredCopy.TypeMeta = existingCopy.TypeMeta
 
 	contentSame := equality.Semantic.DeepEqual(existingCopy, requiredCopy)
-	if contentSame && !*modified {
+	if contentSame && !modified {
 		return existing, false, nil
 	}
 
-	if klog.V(4).Enabled() {
+	if klog.V(2).Enabled() {
 		klog.Infof("StorageClass %q changes: %v", required.Name, JSONPatchNoError(existingCopy, requiredCopy))
 	}
 
 	if storageClassNeedsRecreate(existingCopy, requiredCopy) {
 		requiredCopy.ObjectMeta.ResourceVersion = ""
 		err = client.StorageClasses().Delete(ctx, existingCopy.Name, metav1.DeleteOptions{})
-		reportDeleteEvent(recorder, requiredCopy, err, "Deleting StorageClass to re-create it with updated parameters")
+		resourcehelper.ReportDeleteEvent(recorder, requiredCopy, err, "Deleting StorageClass to re-create it with updated parameters")
 		if err != nil && !apierrors.IsNotFound(err) {
 			return existing, false, err
 		}
@@ -69,13 +100,13 @@ func ApplyStorageClass(ctx context.Context, client storageclientv1.StorageClasse
 		} else if err != nil {
 			err = fmt.Errorf("failed to re-create StorageClass %s: %s", existingCopy.Name, err)
 		}
-		reportCreateEvent(recorder, actual, err)
+		resourcehelper.ReportCreateEvent(recorder, actual, err)
 		return actual, true, err
 	}
 
 	// Only mutable fields need a change
 	actual, err := client.StorageClasses().Update(ctx, requiredCopy, metav1.UpdateOptions{})
-	reportUpdateEvent(recorder, required, err)
+	resourcehelper.ReportUpdateEvent(recorder, required, err)
 	return actual, true, err
 }
 
@@ -111,8 +142,13 @@ func ApplyCSIDriver(ctx context.Context, client storageclientv1.CSIDriversGetter
 	if required.Annotations == nil {
 		required.Annotations = map[string]string{}
 	}
-	err := SetSpecHashAnnotation(&required.ObjectMeta, required.Spec)
-	if err != nil {
+	if required.Labels == nil {
+		required.Labels = map[string]string{}
+	}
+	if err := SetSpecHashAnnotation(&required.ObjectMeta, required.Spec); err != nil {
+		return nil, false, err
+	}
+	if err := validateRequiredCSIDriverLabels(required); err != nil {
 		return nil, false, err
 	}
 
@@ -121,32 +157,41 @@ func ApplyCSIDriver(ctx context.Context, client storageclientv1.CSIDriversGetter
 		requiredCopy := required.DeepCopy()
 		actual, err := client.CSIDrivers().Create(
 			ctx, resourcemerge.WithCleanLabelsAndAnnotations(requiredCopy).(*storagev1.CSIDriver), metav1.CreateOptions{})
-		reportCreateEvent(recorder, required, err)
+		resourcehelper.ReportCreateEvent(recorder, required, err)
 		return actual, true, err
 	}
 	if err != nil {
 		return nil, false, err
 	}
 
-	metadataModified := resourcemerge.BoolPtr(false)
+	// Exempt labels are not overwritten if the value has changed. They get set
+	// once during creation, but the admin may choose to set a different value.
+	// If the label is removed, it reverts back to the default value.
+	for _, exemptLabel := range exemptCSIDriverLabels {
+		if existingValue, ok := existing.Labels[exemptLabel]; ok {
+			required.Labels[exemptLabel] = existingValue
+		}
+	}
+
+	metadataModified := false
 	existingCopy := existing.DeepCopy()
-	resourcemerge.EnsureObjectMeta(metadataModified, &existingCopy.ObjectMeta, required.ObjectMeta)
+	resourcemerge.EnsureObjectMeta(&metadataModified, &existingCopy.ObjectMeta, required.ObjectMeta)
 
 	requiredSpecHash := required.Annotations[specHashAnnotation]
 	existingSpecHash := existing.Annotations[specHashAnnotation]
 	sameSpec := requiredSpecHash == existingSpecHash
-	if sameSpec && !*metadataModified {
+	if sameSpec && !metadataModified {
 		return existing, false, nil
 	}
 
-	if klog.V(4).Enabled() {
+	if klog.V(2).Enabled() {
 		klog.Infof("CSIDriver %q changes: %v", required.Name, JSONPatchNoError(existing, existingCopy))
 	}
 
 	if sameSpec {
 		// Update metadata by a simple Update call
 		actual, err := client.CSIDrivers().Update(ctx, existingCopy, metav1.UpdateOptions{})
-		reportUpdateEvent(recorder, required, err)
+		resourcehelper.ReportUpdateEvent(recorder, required, err)
 		return actual, true, err
 	}
 
@@ -154,7 +199,7 @@ func ApplyCSIDriver(ctx context.Context, client storageclientv1.CSIDriversGetter
 	existingCopy.ObjectMeta.ResourceVersion = ""
 	// Spec is read-only after creation. Delete and re-create the object
 	err = client.CSIDrivers().Delete(ctx, existingCopy.Name, metav1.DeleteOptions{})
-	reportDeleteEvent(recorder, existingCopy, err, "Deleting CSIDriver to re-create it with updated parameters")
+	resourcehelper.ReportDeleteEvent(recorder, existingCopy, err, "Deleting CSIDriver to re-create it with updated parameters")
 	if err != nil && !apierrors.IsNotFound(err) {
 		return existing, false, err
 	}
@@ -169,8 +214,27 @@ func ApplyCSIDriver(ctx context.Context, client storageclientv1.CSIDriversGetter
 	} else if err != nil {
 		err = fmt.Errorf("failed to re-create CSIDriver %s: %s", existingCopy.Name, err)
 	}
-	reportCreateEvent(recorder, existingCopy, err)
+	resourcehelper.ReportCreateEvent(recorder, existingCopy, err)
 	return actual, true, err
+}
+
+func validateRequiredCSIDriverLabels(required *storagev1.CSIDriver) error {
+	supportsEphemeralVolumes := false
+	for _, mode := range required.Spec.VolumeLifecycleModes {
+		if mode == storagev1.VolumeLifecycleEphemeral {
+			supportsEphemeralVolumes = true
+			break
+		}
+	}
+	// All OCP managed CSI drivers that support the Ephemeral volume
+	// lifecycle mode must provide a profile label the be matched against
+	// the pod security policy for the namespace of the pod.
+	// Valid values are: restricted, baseline, privileged.
+	_, labelFound := required.Labels[csiInlineVolProfileLabel]
+	if supportsEphemeralVolumes && !labelFound {
+		return fmt.Errorf("CSIDriver %s supports Ephemeral volume lifecycle but is missing required label %s", required.Name, csiInlineVolProfileLabel)
+	}
+	return nil
 }
 
 func DeleteStorageClass(ctx context.Context, client storageclientv1.StorageClassesGetter, recorder events.Recorder, required *storagev1.StorageClass) (*storagev1.StorageClass, bool,
@@ -182,7 +246,7 @@ func DeleteStorageClass(ctx context.Context, client storageclientv1.StorageClass
 	if err != nil {
 		return nil, false, err
 	}
-	reportDeleteEvent(recorder, required, err)
+	resourcehelper.ReportDeleteEvent(recorder, required, err)
 	return nil, true, nil
 }
 
@@ -194,6 +258,6 @@ func DeleteCSIDriver(ctx context.Context, client storageclientv1.CSIDriversGette
 	if err != nil {
 		return nil, false, err
 	}
-	reportDeleteEvent(recorder, required, err)
+	resourcehelper.ReportDeleteEvent(recorder, required, err)
 	return nil, true, nil
 }
