@@ -53,7 +53,7 @@ require (
 	github.com/openshift/cluster-baremetal-operator v0.0.0-20230414174413-b80af66d9fcc
 	github.com/openshift/custom-resource-status v1.1.2
 	github.com/openshift/generic-admission-server v1.14.1-0.20221208154047-0cd6b8367d91
-	github.com/openshift/hive/apis v0.0.0-20220222213051-def9088fdb5a
+	github.com/openshift/hive/apis 26db04926f99
 	github.com/openshift/image-customization-controller v0.0.0-20220825115740-143afede5e69
 	github.com/openshift/machine-api-operator v0.2.1-0.20201002104344-6abfb5440597
 	github.com/ory/dockertest/v3 v3.9.1
