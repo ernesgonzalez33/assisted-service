@@ -11,19 +11,19 @@ type inodeType uint16
 
 const (
 	inodeBasicDirectory    inodeType = 1
-	inodeBasicFile                   = 2
-	inodeBasicSymlink                = 3
-	inodeBasicBlock                  = 4
-	inodeBasicChar                   = 5
-	inodeBasicFifo                   = 6
-	inodeBasicSocket                 = 7
-	inodeExtendedDirectory           = 8
-	inodeExtendedFile                = 9
-	inodeExtendedSymlink             = 10
-	inodeExtendedBlock               = 11
-	inodeExtendedChar                = 12
-	inodeExtendedFifo                = 13
-	inodeExtendedSocket              = 14
+	inodeBasicFile         inodeType = 2
+	inodeBasicSymlink      inodeType = 3
+	inodeBasicBlock        inodeType = 4
+	inodeBasicChar         inodeType = 5
+	inodeBasicFifo         inodeType = 6
+	inodeBasicSocket       inodeType = 7
+	inodeExtendedDirectory inodeType = 8
+	inodeExtendedFile      inodeType = 9
+	inodeExtendedSymlink   inodeType = 10
+	inodeExtendedBlock     inodeType = 11
+	inodeExtendedChar      inodeType = 12
+	inodeExtendedFifo      inodeType = 13
+	inodeExtendedSocket    inodeType = 14
 )
 
 const (
@@ -110,7 +110,7 @@ func (i *inodeHeader) toBytes() []byte {
 func parseInodeHeader(b []byte) (*inodeHeader, error) {
 	target := inodeHeaderSize
 	if len(b) < target {
-		return nil, fmt.Errorf("Received only %d bytes instead of minimum %d", len(b), target)
+		return nil, fmt.Errorf("received only %d bytes instead of minimum %d", len(b), target)
 	}
 	i := &inodeHeader{
 		inodeType: inodeType(binary.LittleEndian.Uint16(b[0:2])),
@@ -143,11 +143,10 @@ func parseBlockData(u uint32) *blockData {
 		size:       u & 0x00ffffff,
 	}
 }
-func parseFileBlockSizes(b []byte, fileSize, blocksize int) []*blockData {
-	count := fileSize / blocksize
-	blocks := make([]*blockData, 0)
-	for j := 0; j < count && j < len(b); j += 4 {
-		blocks = append(blocks, parseBlockData(binary.LittleEndian.Uint32(b[j:j+4])))
+func parseFileBlockSizes(b []byte, blockListSize int) []*blockData {
+	blocks := make([]*blockData, 0, blockListSize)
+	for j := 0; j < blockListSize && j < len(b); j++ {
+		blocks = append(blocks, parseBlockData(binary.LittleEndian.Uint32(b[4*j:4*j+4])))
 	}
 	return blocks
 }
@@ -239,7 +238,7 @@ func (i basicDirectory) equal(o inodeBody) bool {
 func parseBasicDirectory(b []byte) (*basicDirectory, error) {
 	target := 16
 	if len(b) < target {
-		return nil, fmt.Errorf("Received %d bytes, fewer than minimum %d", len(b), target)
+		return nil, fmt.Errorf("received %d bytes, fewer than minimum %d", len(b), target)
 	}
 	d := &basicDirectory{
 		startBlock:       binary.LittleEndian.Uint32(b[0:4]),
@@ -312,7 +311,7 @@ func parseExtendedDirectory(b []byte) (*extendedDirectory, int, error) {
 		extra  int
 	)
 	if len(b) < target {
-		return nil, 0, fmt.Errorf("Received %d bytes, fewer than minimum %d", len(b), target)
+		return nil, 0, fmt.Errorf("received %d bytes, fewer than minimum %d", len(b), target)
 	}
 	d := &extendedDirectory{
 		links:            binary.LittleEndian.Uint32(b[0:4]),
@@ -331,7 +330,7 @@ func parseExtendedDirectory(b []byte) (*extendedDirectory, int, error) {
 	//      unsigned int            start_block;
 	//      unsigned int            size;
 	//      unsigned char           name[0];
-	//};
+	// };
 	// so each is 4 int + 1 char
 	extra = int(d.indexCount) * inodeDirectoryIndexEntrySize
 	// do we have enough data left to read those?
@@ -369,7 +368,7 @@ func parseDirectoryIndexes(b []byte, count int) ([]*directoryIndex, error) {
 
 // basicFile
 type basicFile struct {
-	startBlock         uint32 // block count from the start of the data section where data for this file is stored
+	blocksStart        uint32 // The offset from the start of the archive to the first data block.
 	fragmentBlockIndex uint32
 	fragmentOffset     uint32
 	fileSize           uint32
@@ -392,12 +391,12 @@ func (i basicFile) equal(o inodeBody) bool {
 			return false
 		}
 	}
-	return i.startBlock == oi.startBlock && i.fragmentOffset == oi.fragmentOffset && i.fragmentBlockIndex == oi.fragmentBlockIndex && i.fileSize == oi.fileSize
+	return i.blocksStart == oi.blocksStart && i.fragmentOffset == oi.fragmentOffset && i.fragmentBlockIndex == oi.fragmentBlockIndex && i.fileSize == oi.fileSize
 }
 
 func (i basicFile) toBytes() []byte {
 	b := make([]byte, 16+4*len(i.blockSizes))
-	binary.LittleEndian.PutUint32(b[0:4], i.startBlock)
+	binary.LittleEndian.PutUint32(b[0:4], i.blocksStart)
 	binary.LittleEndian.PutUint32(b[4:8], i.fragmentBlockIndex)
 	binary.LittleEndian.PutUint32(b[8:12], i.fragmentOffset)
 	binary.LittleEndian.PutUint32(b[12:16], i.fileSize)
@@ -414,7 +413,7 @@ func (i basicFile) xattrIndex() (uint32, bool) {
 }
 func (i basicFile) toExtended() extendedFile {
 	return extendedFile{
-		startBlock:         uint64(i.startBlock),
+		blocksStart:        uint64(i.blocksStart),
 		fileSize:           uint64(i.fileSize),
 		sparse:             0,
 		links:              0,
@@ -430,24 +429,24 @@ func parseBasicFile(b []byte, blocksize int) (*basicFile, int, error) {
 		extra  int
 	)
 	if len(b) < target {
-		return nil, 0, fmt.Errorf("Received %d bytes, fewer than minimum %d", len(b), target)
+		return nil, 0, fmt.Errorf("received %d bytes, fewer than minimum %d", len(b), target)
 	}
 	fileSize := binary.LittleEndian.Uint32(b[12:16])
 	d := &basicFile{
-		startBlock:         binary.LittleEndian.Uint32(b[0:4]),
+		blocksStart:        binary.LittleEndian.Uint32(b[0:4]),
 		fragmentBlockIndex: binary.LittleEndian.Uint32(b[4:8]),
 		fragmentOffset:     binary.LittleEndian.Uint32(b[8:12]),
 		fileSize:           fileSize,
 	}
 	// see how many other bytes we need to read
-	blockListSize := int(d.fileSize) / blocksize
-	if int(d.fileSize)%blocksize > 0 && d.fragmentBlockIndex != 0xffffffff {
+	blockListSize := int(d.fileSize / uint32(blocksize))
+	if d.fileSize%uint32(blocksize) > 0 && d.fragmentBlockIndex == 0xffffffff {
 		blockListSize++
 	}
 	// do we have enough data left to read those?
 	extra = blockListSize * 4
 	if len(b[16:]) >= extra {
-		d.blockSizes = parseFileBlockSizes(b[16:], int(fileSize), blocksize)
+		d.blockSizes = parseFileBlockSizes(b[16:], blockListSize)
 		extra = 0
 	}
 
@@ -456,7 +455,7 @@ func parseBasicFile(b []byte, blocksize int) (*basicFile, int, error) {
 
 // extendedFile
 type extendedFile struct {
-	startBlock         uint64
+	blocksStart        uint64
 	fileSize           uint64
 	sparse             uint64
 	links              uint32
@@ -482,7 +481,7 @@ func (i extendedFile) equal(o inodeBody) bool {
 			return false
 		}
 	}
-	return i.startBlock == oi.startBlock &&
+	return i.blocksStart == oi.blocksStart &&
 		i.fragmentOffset == oi.fragmentOffset &&
 		i.fragmentBlockIndex == oi.fragmentBlockIndex &&
 		i.fileSize == oi.fileSize &&
@@ -493,7 +492,7 @@ func (i extendedFile) equal(o inodeBody) bool {
 
 func (i extendedFile) toBytes() []byte {
 	b := make([]byte, 40+4*len(i.blockSizes))
-	binary.LittleEndian.PutUint64(b[0:8], i.startBlock)
+	binary.LittleEndian.PutUint64(b[0:8], i.blocksStart)
 	binary.LittleEndian.PutUint64(b[8:16], i.fileSize)
 	binary.LittleEndian.PutUint64(b[16:24], i.sparse)
 	binary.LittleEndian.PutUint32(b[24:28], i.links)
@@ -518,11 +517,11 @@ func parseExtendedFile(b []byte, blocksize int) (*extendedFile, int, error) {
 		extra  int
 	)
 	if len(b) < target {
-		return nil, 0, fmt.Errorf("Received %d bytes instead of expected minimal %d", len(b), target)
+		return nil, 0, fmt.Errorf("received %d bytes instead of expected minimal %d", len(b), target)
 	}
 	fileSize := binary.LittleEndian.Uint64(b[8:16])
 	d := &extendedFile{
-		startBlock:         binary.LittleEndian.Uint64(b[0:8]),
+		blocksStart:        binary.LittleEndian.Uint64(b[0:8]),
 		fileSize:           fileSize,
 		sparse:             binary.LittleEndian.Uint64(b[16:24]),
 		links:              binary.LittleEndian.Uint32(b[24:28]),
@@ -531,14 +530,14 @@ func parseExtendedFile(b []byte, blocksize int) (*extendedFile, int, error) {
 		xAttrIndex:         binary.LittleEndian.Uint32(b[36:40]),
 	}
 	// see how many other bytes we need to read
-	blockListSize := int(d.fileSize) / blocksize
-	if int(d.fileSize)%blocksize > 0 && d.fragmentBlockIndex != 0xffffffff {
+	blockListSize := int(d.fileSize / uint64(blocksize))
+	if d.fileSize%uint64(blocksize) > 0 && d.fragmentBlockIndex == 0xffffffff {
 		blockListSize++
 	}
 	// do we have enough data left to read those?
 	extra = blockListSize * 4
-	if len(b[16:]) >= extra {
-		d.blockSizes = parseFileBlockSizes(b[16:], int(fileSize), blocksize)
+	if len(b[40:]) >= extra {
+		d.blockSizes = parseFileBlockSizes(b[40:], blockListSize)
 		extra = 0
 	}
 	return d, extra, nil
@@ -581,7 +580,7 @@ func parseBasicSymlink(b []byte) (*basicSymlink, int, error) {
 		extra  int
 	)
 	if len(b) < target {
-		return nil, 0, fmt.Errorf("Received %d bytes instead of expected minimal %d", len(b), target)
+		return nil, 0, fmt.Errorf("received %d bytes instead of expected minimal %d", len(b), target)
 	}
 	s := &basicSymlink{
 		links: binary.LittleEndian.Uint32(b[0:4]),
@@ -635,16 +634,17 @@ func parseExtendedSymlink(b []byte) (*extendedSymlink, int, error) {
 		extra  int
 	)
 	if len(b) < target {
-		return nil, 0, fmt.Errorf("Received %d bytes instead of expected minimal %d", len(b), target)
+		return nil, 0, fmt.Errorf("received %d bytes instead of expected minimal %d", len(b), target)
 	}
 	s := &extendedSymlink{
 		links: binary.LittleEndian.Uint32(b[0:4]),
 	}
+	targetSize := int(binary.LittleEndian.Uint32(b[4:8]))
 	// account for the synlink target, plus 4 bytes for the xattr index after it
-	extra = int(binary.LittleEndian.Uint32(b[4:8])) + 4
-	if len(b[target:]) > extra {
-		s.target = string(b[8 : 8+extra])
-		s.xAttrIndex = binary.LittleEndian.Uint32(b[8+extra : 8+extra+4])
+	extra = targetSize + 4
+	if len(b) >= extra+target {
+		s.target = string(b[target : target+targetSize])
+		s.xAttrIndex = binary.LittleEndian.Uint32(b[target+targetSize : target+targetSize+4])
 		extra = 0
 	}
 	return s, extra, nil
@@ -658,8 +658,7 @@ type basicDevice struct {
 
 func (i basicDevice) toBytes() []byte {
 	b := make([]byte, 8)
-	var devNum uint32
-	devNum = (i.major << 8) | (i.minor & 0xff) | ((i.minor & 0xfff00) << 12)
+	var devNum = (i.major << 8) | (i.minor & 0xff) | ((i.minor & 0xfff00) << 12)
 
 	binary.LittleEndian.PutUint32(b[0:4], i.links)
 	binary.LittleEndian.PutUint32(b[4:8], devNum)
@@ -685,7 +684,7 @@ func (i basicDevice) equal(o inodeBody) bool {
 func parseBasicDevice(b []byte) (*basicDevice, error) {
 	target := 8
 	if len(b) < target {
-		return nil, fmt.Errorf("Received %d bytes instead of expected %d", len(b), target)
+		return nil, fmt.Errorf("received %d bytes instead of expected %d", len(b), target)
 	}
 	devNum := binary.LittleEndian.Uint32(b[4:8])
 	s := &basicDevice{
@@ -745,11 +744,11 @@ func (i extendedDevice) equal(o inodeBody) bool {
 func parseExtendedDevice(b []byte) (*extendedDevice, error) {
 	target := 12
 	if len(b) < target {
-		return nil, fmt.Errorf("Received %d bytes instead of expected minimal %d", len(b), target)
+		return nil, fmt.Errorf("received %d bytes instead of expected minimal %d", len(b), target)
 	}
 	basic, err := parseBasicDevice(b[:8])
 	if err != nil {
-		return nil, fmt.Errorf("Error parsing block device: %v", err)
+		return nil, fmt.Errorf("error parsing block device: %v", err)
 	}
 	return &extendedDevice{
 		links:      basic.links,
@@ -798,7 +797,7 @@ func (i basicIPC) equal(o inodeBody) bool {
 func parseBasicIPC(b []byte) (*basicIPC, error) {
 	target := 4
 	if len(b) < target {
-		return nil, fmt.Errorf("Received %d bytes instead of expected %d", len(b), target)
+		return nil, fmt.Errorf("received %d bytes instead of expected %d", len(b), target)
 	}
 	s := &basicIPC{
 		links: binary.LittleEndian.Uint32(b[0:4]),
@@ -846,7 +845,7 @@ func (i extendedIPC) equal(o inodeBody) bool {
 func parseExtendedIPC(b []byte) (*extendedIPC, error) {
 	target := 8
 	if len(b) < target {
-		return nil, fmt.Errorf("Received %d bytes instead of expected %d", len(b), target)
+		return nil, fmt.Errorf("received %d bytes instead of expected %d", len(b), target)
 	}
 	s := &extendedIPC{
 		links:      binary.LittleEndian.Uint32(b[0:4]),
@@ -863,6 +862,8 @@ type extendedSocket struct {
 }
 
 // idTable is an indexed table of IDs
+//
+// we need these references in the future
 type idTable []uint32
 
 // parseInodeBody parse the body of an inode. This only parses the non-variable size part,
