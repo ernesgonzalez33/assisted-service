@@ -200,7 +200,7 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.0.3-0.20211202193544-a5463b7f9c84 // indirect
 	github.com/opencontainers/runc v1.1.2 // indirect
-	github.com/openshift/cluster-api-provider-gcp v0.0.1-0.20201002065957-9854f7420570 // indirect
+	github.com/openshift/cluster-api-provider-gcp 37085d528703 // indirect
 	github.com/openshift/library-go v0.0.0-20220525163858-e52677de4d64 // indirect
 	github.com/openshift/machine-config-operator v0.0.1-0.20201023110058-6c8bd9b2915c
 	github.com/pierrec/lz4 v2.3.0+incompatible // indirect
